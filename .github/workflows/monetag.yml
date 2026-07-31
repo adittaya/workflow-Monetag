@@ -151,19 +151,25 @@ jobs:
               break
             fi
 
-            if [ "$attempt" -eq 1 ]; then
-              if [ -z "$CURRENT_PROXY" ]; then
-                echo "No proxy available, running direct..."
-                unset MONETAG_PROXY
-              else
-                export MONETAG_PROXY="http://$CURRENT_PROXY"
+            if [ "$attempt" -gt 1 ]; then
+              echo "Attempt $((attempt - 1)) did not verify — picking a fresh proxy..."
+              FRESH=$(python3 proxy_rotator.py premium | tail -1)
+              if [ -n "$FRESH" ]; then
+                CURRENT_PROXY="$FRESH"
+                echo "New proxy: $FRESH"
               fi
-            else
-              echo "Proxy attempt did not verify — retrying without proxy (direct)"
-              unset MONETAG_PROXY
             fi
 
-            echo "=== Attempt $attempt/$MAX_ATTEMPTS (proxy: ${MONETAG_PROXY:-direct}) ==="
+            # Proxy-only: a "direct" fallback uses the runner's datacenter IP,
+            # which advertisers don't count as a view. No proxy → fail the
+            # attempt; the relay will retry on the next run.
+            if [ -z "$CURRENT_PROXY" ]; then
+              echo "::warning::No proxy available (pool exhausted) — skipping attempt $attempt (no direct fallback)"
+              continue
+            fi
+            export MONETAG_PROXY="http://$CURRENT_PROXY"
+
+            echo "=== Attempt $attempt/$MAX_ATTEMPTS (proxy: $CURRENT_PROXY) ==="
             timeout $ENGINE_TIMEOUT python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
               --views "$MONETAG_VIEWS" \
               --verify-mode "$MONETAG_VERIFY_MODE" \
