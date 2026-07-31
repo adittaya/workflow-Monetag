@@ -228,6 +228,18 @@ def get_run_logs(token, owner, repo, run_id):
     except Exception:
         return {}
 
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Strip auth headers on cross-host redirects. Artifact zips redirect to
+    Azure blob storage; forwarding the GitHub Authorization header there fails
+    with 403 AuthenticationFailed."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req:
+            new_req.headers.pop("Authorization", None)
+            new_req.headers.pop("User-Agent", None)
+        return new_req
+
+
 def download_run_artifact(token, owner, repo, run_id, artifact_name):
     """Download a run's artifact (zip) and return {filename: text} contents.
     Artifacts are NOT secret-masked, so they reliably carry config/report values."""
@@ -245,7 +257,8 @@ def download_run_artifact(token, owner, repo, run_id, artifact_name):
             req2 = urllib.request.Request(f"{GITHUB_API}{url2}")
             req2.add_header("Authorization", f"token {token}")
             req2.add_header("User-Agent", "monetag-tui/3.0")
-            with urllib.request.urlopen(req2, timeout=GH_TIMEOUT) as resp2:
+            opener = urllib.request.build_opener(_NoAuthRedirect)
+            with opener.open(req2, timeout=GH_TIMEOUT) as resp2:
                 zf = zipfile.ZipFile(io.BytesIO(resp2.read()))
                 return {n: zf.read(n).decode(errors="replace") for n in zf.namelist()}
     except Exception:
@@ -255,24 +268,26 @@ def download_run_artifact(token, owner, repo, run_id, artifact_name):
 # ─── Deployment Config Recovery ───────────────────────────────────────────────
 
 def parse_run_log_config(logs):
-    """Pull a deployment's config from the 'Validate SmartLink URL' log echoes."""
+    """Pull a deployment's config from the 'Validate SmartLink URL' log echoes.
+    The echo of the bash script lines (e.g. `echo "Traffic source: $MONETAG_TRAFFIC_SOURCE"`)
+    also matches these labels, so only values that pass strict validation are kept."""
     cfg = {}
     text = "\n".join(logs.values())
     m = re.search(r"SmartLink:\s*(\S+)", text)
     if m and m.group(1).startswith("http"):
         cfg["smartlink_url"] = m.group(1)
     m = re.search(r"Traffic source:\s*(\S+)", text)
-    if m:
-        cfg["traffic_source"] = m.group(1)
+    if m and m.group(1).strip('"') in ("youtube", "google", "facebook", "twitter", "direct"):
+        cfg["traffic_source"] = m.group(1).strip('"')
     m = re.search(r"Referrer \(traffic source URL\):\s*(\S+)", text)
-    if m and m.group(1):
+    if m and m.group(1).startswith("http"):
         cfg["traffic_source_url"] = m.group(1)
     m = re.search(r"Verify mode:\s*(\S+)", text)
-    if m:
-        cfg["verify_mode"] = m.group(1)
+    if m and m.group(1).strip('"') in ("strict", "lenient"):
+        cfg["verify_mode"] = m.group(1).strip('"')
     m = re.search(r"Views:\s*(\S+)", text)
-    if m:
-        cfg["views"] = m.group(1)
+    if m and m.group(1).strip('"').isdigit():
+        cfg["views"] = m.group(1).strip('"')
     return cfg
 
 def recover_deployment_config(token, owner, rn):
