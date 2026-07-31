@@ -72,6 +72,22 @@ jobs:
             echo "::warning::SUPABASE_URL is empty — proxy will not work"
           fi
 
+      - name: Save run config
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          cfg = {
+            "smartlink_url": os.environ.get("MONETAG_SMARTLINK_URL", ""),
+            "traffic_source": os.environ.get("MONETAG_TRAFFIC_SOURCE", ""),
+            "traffic_source_url": os.environ.get("MONETAG_REFERER", ""),
+            "verify_mode": os.environ.get("MONETAG_VERIFY_MODE", ""),
+            "views": os.environ.get("MONETAG_VIEWS", ""),
+          }
+          with open("run_config.json", "w") as f:
+              json.dump(cfg, f, indent=2)
+          print("Saved run config: " + json.dumps({k: ("***" if k in ("smartlink_url", "traffic_source_url") else v) for k, v in cfg.items()}))
+          PYEOF
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -164,6 +180,17 @@ jobs:
             echo "status=failure" >> $GITHUB_OUTPUT
             echo "No view report produced"
           fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-config
+          path: |
+            run_config.json
+            view_report.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Relay — trigger next run
         if: always() && github.event.inputs.no_relay != '1'

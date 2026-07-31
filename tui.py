@@ -173,6 +173,17 @@ def get_runs(owner, repo, token, per=5):
     return data.get("workflow_runs", [])
 
 def extract_destination(token, owner, repo, run_id):
+    """Extract the landing offer destination from a run's artifact or logs."""
+    files = download_run_artifact(token, owner, repo, run_id, "run-config")
+    raw = files.get("view_report.json", "")
+    if raw:
+        try:
+            r = json.loads(raw)
+            for v in r.get("views", []):
+                if v.get("final_url") and v["final_url"].startswith("http"):
+                    return v["final_url"]
+        except Exception:
+            pass
     url = f"/repos/{owner}/{repo}/actions/runs/{run_id}/logs"
     req = urllib.request.Request(f"{GITHUB_API}{url}")
     req.add_header("Authorization", f"token {token}")
@@ -217,6 +228,30 @@ def get_run_logs(token, owner, repo, run_id):
     except Exception:
         return {}
 
+def download_run_artifact(token, owner, repo, run_id, artifact_name):
+    """Download a run's artifact (zip) and return {filename: text} contents.
+    Artifacts are NOT secret-masked, so they reliably carry config/report values."""
+    url = f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"
+    req = urllib.request.Request(f"{GITHUB_API}{url}")
+    req.add_header("Authorization", f"token {token}")
+    req.add_header("User-Agent", "monetag-tui/3.0")
+    try:
+        with urllib.request.urlopen(req, timeout=GH_TIMEOUT) as resp:
+            arts = (json.loads(resp.read()) or {}).get("artifacts", [])
+        for a in arts:
+            if a.get("name") != artifact_name or a.get("expired"):
+                continue
+            url2 = f"/repos/{owner}/{repo}/actions/artifacts/{a['id']}/zip"
+            req2 = urllib.request.Request(f"{GITHUB_API}{url2}")
+            req2.add_header("Authorization", f"token {token}")
+            req2.add_header("User-Agent", "monetag-tui/3.0")
+            with urllib.request.urlopen(req2, timeout=GH_TIMEOUT) as resp2:
+                zf = zipfile.ZipFile(io.BytesIO(resp2.read()))
+                return {n: zf.read(n).decode(errors="replace") for n in zf.namelist()}
+    except Exception:
+        pass
+    return {}
+
 # ─── Deployment Config Recovery ───────────────────────────────────────────────
 
 def parse_run_log_config(logs):
@@ -241,10 +276,22 @@ def parse_run_log_config(logs):
     return cfg
 
 def recover_deployment_config(token, owner, rn):
-    """Recover a deployment's current config (SmartLink/traffic) from GitHub."""
+    """Recover a deployment's current config (SmartLink/traffic) from GitHub.
+    Priority: run artifact 'run-config' → run inputs → log echoes.
+    Secrets are masked in logs, so the artifact is the only reliable source."""
     cfg = {}
     runs = get_runs(owner, rn, token, per=3)
     for run in runs:
+        files = download_run_artifact(token, owner, rn, run["id"], "run-config")
+        raw = files.get("run_config.json", "")
+        if raw:
+            try:
+                rc = json.loads(raw)
+                cfg = {k: v for k, v in rc.items() if v}
+                if cfg.get("smartlink_url"):
+                    return cfg
+            except Exception:
+                cfg = {}
         inputs = run.get("inputs") or {}
         if inputs.get("smartlink_url"):
             for k in ("smartlink_url", "traffic_source_url", "traffic_source", "verify_mode", "views"):
