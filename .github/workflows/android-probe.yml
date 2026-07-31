@@ -42,7 +42,7 @@ jobs:
           profile: pixel_7
           disable-animations: true
           disable-linux-hw-accel: false
-          emulator-options: -accel on
+          emulator-options: -accel on -no-window
           script: |
             set -e
             mkdir -p probe
