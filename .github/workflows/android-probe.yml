@@ -1,0 +1,106 @@
+name: Android Probe (real arm64 emulator)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    # Apple Silicon runner: arm64 Android images run natively via Hypervisor.framework.
+    # x86_64 images would be unaccelerated QEMU here — do NOT switch arch.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      MONETAG_SMARTLINK_URL: ${{ secrets.MONETAG_SMARTLINK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Run headless arm64 Android emulator + collect evidence
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis_playstore
+          arch: arm64-v8a
+          profile: pixel_7
+          disable-animations: true
+          headless: true
+          script: |
+            set -e
+            mkdir -p probe
+            echo "=== DEVICE / BUILD FINGERPRINT ==="
+            adb shell getprop ro.build.fingerprint
+            adb shell getprop ro.product.model
+            adb shell getprop ro.product.brand
+            adb shell getprop ro.product.device
+            adb shell getprop ro.hardware
+            adb shell getprop ro.product.cpu.abi
+            adb shell getprop ro.build.version.release
+            adb shell getprop ro.build.version.sdk
+            adb shell getprop ro.build.flavor
+            adb shell getprop ro.build.type
+            adb shell getprop ro.debuggable
+            adb shell getprop ro.secure
+            adb shell getprop ro.bootimage.build.fingerprint
+
+            echo "=== BROWSERS PRESENT ==="
+            adb shell pm list packages | grep -iE 'chrome|webview' || echo "NONE"
+
+            echo "=== FORCE-PROVISION (skip setup wizard) ==="
+            adb shell settings put global device_provisioned 1 || true
+            adb shell settings put secure user_setup_complete 1 || true
+
+            echo "=== UA / CLIENT-HINT CAPTURE (real browser headers) ==="
+            cat > probe/ua_server.py <<'PYEOF'
+            from http.server import HTTPServer, BaseHTTPRequestHandler
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    with open("probe/ua_capture.txt","a") as f:
+                        f.write("PATH="+self.path+"\n")
+                        for k,v in self.headers.items():
+                            if k.lower() in ("user-agent","sec-ch-ua","sec-ch-ua-mobile","sec-ch-ua-platform","sec-ch-ua-arch","sec-ch-ua-platform-version","sec-ch-ua-model","x-requested-with","accept-language"):
+                                f.write(f"{k}: {v}\n")
+                        f.write("---\n")
+                    self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+                def log_message(self,*a): pass
+            HTTPServer(("127.0.0.1",8888),H).serve_forever()
+            PYEOF
+            python3 probe/ua_server.py &
+            SRV=$!
+            sleep 1
+            adb reverse tcp:8888 tcp:8888
+            adb shell am start -a android.intent.action.VIEW -d "http://127.0.0.1:8888/ua" || true
+            sleep 8
+            adb exec-out screencap -p > probe/ua_screen.png || true
+            kill $SRV || true
+            echo "--- UA CAPTURE ---"
+            cat probe/ua_capture.txt || echo "no UA captured"
+
+            echo "=== SMARTLINK OPEN ==="
+            if [ -n "$MONETAG_SMARTLINK_URL" ]; then
+              adb shell am start -a android.intent.action.VIEW -d "$MONETAG_SMARTLINK_URL" || echo "am start failed"
+              sleep 30
+              adb exec-out screencap -p > probe/smartlink_1.png || true
+              adb shell dumpsys activity activities | grep -iE 'mResumedActivity|topResumed|http' | head -30 || true
+              adb shell dumpsys window windows | grep -iE 'mCurrentFocus|mFocusedApp' || true
+            else
+              echo "MONETAG_SMARTLINK_URL secret not set — skipping smartlink open"
+            fi
+
+            echo "=== FULL PROBE EVIDENCE ==="
+            adb shell getprop > probe/getprop_full.txt
+            adb shell dumpsys package com.android.chrome > probe/chrome_pkg.txt 2>/dev/null || echo "chrome pkg missing" > probe/chrome_pkg.txt
+            adb shell ls /sdcard > probe/sdcard.txt || true
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-probe-evidence
+          path: probe/
+          if-no-files-found: warn
