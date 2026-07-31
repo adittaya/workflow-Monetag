@@ -129,7 +129,7 @@
 - [x] Workflow: automate step 2min→3min, ENGINE_TIMEOUT=90 stays, success ~65s — `9567ced`
 - [x] Artifact recovery: `run_config.json` + `view_report.json` uploaded as `run-config` artifact (not secret-masked); `_NoAuthRedirect` strips Authorization on Azure redirect (fixes 403); hardened `parse_run_log_config`; `extract_destination` prefers artifact final_url — `4885475` + `3080a37`
 - [x] Production re-test run #4 SUCCESS ~2min (automation 17s, inline offer VIEW_LIKELY 71); recovery validated end-to-end from run #4 artifact
-- [x] Relay self-loop guard: skip relay when `RELAY_TARGET_REPO` equals the running repo (default `github.repository` = itself → infinite loop); set a sink repo secret to enable chaining — `76e4cb4`
+- [x] Relay 24/7 loop: `RELAY_TARGET_REPO` defaults to empty (skip relay + warning) so the official repo can't self-loop; TUI `deploy_new` sets it to the deployed repo itself → continuous back-to-back self-loop (24/7). Self-target guard approach reverted — `f4c0789`
 
 ---
 
