@@ -31,6 +31,7 @@ DEFAULTS = {
     "vnc_port": 5900,
     "views": 1,
     "target_geo": "",
+    "ipcook_url": "",
 }
 
 

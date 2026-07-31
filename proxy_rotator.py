@@ -383,11 +383,83 @@ def test_proxy_selenium(proxy, timeout_s=60):
 import random
 
 
+def _ipcook_url():
+    """IPCook genips API URL — PRIMARY proxy source. Read from IPCOOK_URL env
+    (CI secret) or config ipcook_url. Returns '' when not configured."""
+    url = os.environ.get("IPCOOK_URL", "").strip()
+    if not url:
+        try:
+            url = (config.load() or {}).get("ipcook_url", "").strip()
+        except Exception:
+            url = ""
+    return url
+
+
+def get_ipcook_proxy():
+    """Fetch one credentialed proxy from the IPCook dynamic-genips API
+    (PRIMARY source). The response is one host:port:user:pass per line; each
+    credential rotates residential exit IPs (fresh per connection), so a single
+    paste feeds the loop until its bandwidth quota is exhausted.
+
+    Returns {"ip", "port", "proxy", "source": "ipcook"} or None.
+    """
+    url = _ipcook_url()
+    if not url:
+        return None
+    try:
+        resp = req_lib.get(url, timeout=30)
+        if not resp.ok:
+            print(f"  [IPCook] HTTP {resp.status_code}", file=sys.stderr)
+            return None
+        text = resp.text or ""
+        for line in text.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) < 4:
+                continue
+            host, port = parts[0], parts[1]
+            user, pw = parts[2], ":".join(parts[3:])
+            import urllib.parse
+            proxy = f"http://{urllib.parse.quote(user)}:{urllib.parse.quote(pw)}@{host}:{port}"
+            print(f"  [IPCook] got {host}:{port} (source=ipcook)", file=sys.stderr)
+            return {"ip": host, "port": int(port), "proxy": proxy, "source": "ipcook"}
+        print("  [IPCook] no usable lines in response", file=sys.stderr)
+        return None
+    except Exception as e:  # noqa: BLE001
+        print(f"  [IPCook] error: {e}", file=sys.stderr)
+        return None
+
+
+def proxy_str(p):
+    """String form of a proxy dict for CLI/workflow consumption. IPCook entries
+    carry credentials (user:pass@host:port); Supabase entries are plain ip:port.
+    No scheme — callers prepend http://."""
+    if p and p.get("source") == "ipcook":
+        return (p.get("proxy") or "").replace("http://", "").replace("https://", "")
+    return f"{p.get('ip')}:{p.get('port')}" if p else ""
+
+
+def _finalize_proxy(picked, source):
+    """Add uniform proxy/source keys to a Supabase pick."""
+    if picked is None:
+        return None
+    picked = dict(picked)
+    picked.setdefault("proxy", f"http://{picked['ip']}:{picked['port']}")
+    picked.setdefault("source", source)
+    return picked
+
+
 def get_proxy(tier="premium", validate=None):
-    """Pick a proxy. `validate=None` honors MONETAG_VALIDATE_PROXIES;
-    True/False force/disable the Engine-2 browser validation (fast path)."""
+    """Pick a proxy. IPCook (rotating residential API, credentialed) is the
+    PRIMARY source; the Supabase pool is the fallback. `validate=None` honors
+    MONETAG_VALIDATE_PROXIES; True/False force/disable the Engine-2 browser
+    validation (fast path)."""
     if validate is None:
         validate = os.environ.get("MONETAG_VALIDATE_PROXIES", "1") == "1"
+
+    ipcook = get_ipcook_proxy()
+    if ipcook:
+        return ipcook
+
     print("  [Proxy] Fetching proxies from Supabase (unlimited, batched)...", file=sys.stderr)
     all_proxies = fetch_proxies(tier, batch_size=500, max_batches=20)
     print(f"  [Proxy] Found {len(all_proxies)} {tier} proxies in DB (paginated)", file=sys.stderr)
@@ -445,12 +517,12 @@ def get_proxy(tier="premium", validate=None):
     if validate:
         picked = _pick_browser_validated(alive)
         if picked is not None:
-            return picked
+            return _finalize_proxy(picked, "supabase")
         print("  [Proxy] No proxy passed browser validation; falling back to fastest TCP-alive (views may not count)", file=sys.stderr)
 
     picked = alive[0]
     print(f"  [Proxy] Selected: {picked['ip']}:{picked['port']} ({picked.get('latency_ms', '?')}ms) [{len(alive)} alive, {len(dead)} deleted]", file=sys.stderr)
-    return picked
+    return _finalize_proxy(picked, "supabase")
 
 
 def _pick_browser_validated(alive, top_n=5, max_workers=3):
@@ -532,8 +604,8 @@ def verify_proxy_ip(proxy):
     else:
         print(f"  {YELLOW}{warn}{NC} Could not determine direct IP")
 
-    proxy_url = f"http://{proxy['ip']}:{proxy['port']}"
-    print(f"  {CYAN}Launching browser via proxy {proxy['ip']}:{proxy['port']}...{NC}")
+    proxy_url = proxy.get("proxy") or f"http://{proxy['ip']}:{proxy['port']}"
+    print(f"  {CYAN}Launching browser via proxy {proxy_str(proxy)}...{NC}")
     driver = None
     try:
         options = Options()
@@ -855,7 +927,7 @@ if __name__ == "__main__":
                 break
         p = get_proxy_quick(tier)
         if p:
-            print(f"{p['ip']}:{p['port']}")
+            print(proxy_str(p))
             sys.exit(0)
         sys.exit(1)
 
@@ -867,7 +939,7 @@ if __name__ == "__main__":
     try:
         p = get_proxy(tier)
         if p:
-            print(f"{p['ip']}:{p['port']}")
+            print(proxy_str(p))
             sys.exit(0)
         sys.exit(1)
     except Exception as e:

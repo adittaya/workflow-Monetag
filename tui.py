@@ -1301,19 +1301,22 @@ def screen_settings():
         ss = settings.get("supabase_secret", "")
         sl = settings.get("smartlink_url", "")
         ts_url = settings.get("traffic_source_url", "")
+        ipcook_url = settings.get("ipcook_url", "")
 
         print(f"  {C_DIM}Supabase URL:{C_RESET}        {su or f'{C_YELLOW}not set{C_RESET}'}")
         print(f"  {C_DIM}Supabase Key:{C_RESET}        {sk[:4]}...{sk[-4:] if len(sk) > 4 else ''}" if sk else f"  {C_DIM}Supabase Key:{C_RESET}        {C_YELLOW}not set{C_RESET}")
         print(f"  {C_DIM}Supabase Secret:{C_RESET}      {ss[:4]}...{ss[-4:] if len(ss) > 4 else ''}" if ss else f"  {C_DIM}Supabase Secret:{C_RESET}      {C_YELLOW}not set{C_RESET}")
         print(f"  {C_DIM}Monetag Link:{C_RESET}          {sl or f'{C_YELLOW}not set{C_RESET}'}")
         print(f"  {C_DIM}Traffic Src URL:{C_RESET}       {ts_url or f'{C_YELLOW}not set{C_RESET}'}")
+        print(f"  {C_DIM}IPCook URL:{C_RESET}            {f'{ipcook_url[:50]}...' if len(ipcook_url) > 50 else (ipcook_url or f'{C_YELLOW}not set (primary proxy source){C_RESET}')}")
         print()
         print(f"  {C_BOLD}[1]{C_RESET} Set Supabase URL")
         print(f"  {C_BOLD}[2]{C_RESET} Set Supabase Key")
         print(f"  {C_BOLD}[3]{C_RESET} Set Supabase Secret")
         print(f"  {C_BOLD}[4]{C_RESET} Set Monetag link (SmartLink URL)")
         print(f"  {C_BOLD}[5]{C_RESET} Set Traffic Source URL (YouTube / any link)")
-        print(f"  {C_BOLD}[6]{C_RESET} Clear all settings")
+        print(f"  {C_BOLD}[6]{C_RESET} Set IPCook proxy URL (paste genips link)")
+        print(f"  {C_BOLD}[7]{C_RESET} Clear all settings")
         print(f"  {C_BOLD}[0]{C_RESET} Back\n")
 
         choice = prompt("Choice")
@@ -1352,6 +1355,25 @@ def screen_settings():
             save_json("settings.json", settings)
             success("Saved")
         elif choice == "6":
+            val = prompt("IPCook genips URL (paste full link)", settings.get("ipcook_url"))
+            if val:
+                ok, count, detail = _test_ipcook(val)
+                if ok:
+                    settings["ipcook_url"] = val.strip()
+                    save_json("settings.json", settings)
+                    try:
+                        _write_config_key("ipcook_url", val.strip())
+                    except Exception:
+                        pass
+                    success(f"IPCook URL saved ({detail})")
+                    if confirm("Set IPCOOK_URL secret on deployments + re-dispatch?"):
+                        deps = load_json("deployments.json")
+                        _maybe_set_ipcook_secret(val.strip(), settings, deps, [])
+                else:
+                    error(f"IPCook URL invalid: {detail}")
+            else:
+                success("Unchanged")
+        elif choice == "7":
             if confirm("Clear all settings?"):
                 save_json("settings.json", {})
                 success("Settings cleared")
@@ -1432,6 +1454,24 @@ def _doc_check_scopes(scopes):
         missing.append("workflow")
     return missing
 
+
+def _test_ipcook(url):
+    """Fetch an IPCook genips URL and report how many usable credentials it
+    returns. Returns (ok_or_None, count, detail)."""
+    if not url:
+        return None, 0, "not configured"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "monetag-tui/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        lines = [l for l in body.splitlines() if len(l.strip().split(":")) >= 4]
+        if not lines:
+            return False, 0, "API returned no usable host:port:user:pass lines"
+        parts = lines[0].strip().split(":")
+        return True, len(lines), f"{len(lines)} creds, e.g. {parts[0]}:{parts[1]} (user:{parts[2]})"
+    except Exception as e:
+        return False, 0, f"fetch failed ({str(e)[:60]})"
+
 def _classify_failure(token, owner, rn, run):
     """Inspect a failed run's logs and return (status, guidance)."""
     try:
@@ -1458,6 +1498,44 @@ def _classify_failure(token, owner, rn, run):
     if re.search(r"rate.?limit|403\b|Unauthorized", text, re.I):
         return ("warn", "GitHub rate limit or auth problem — check the token in Accounts [1].")
     return ("info", "check the full log tail in View Logs [6].")
+
+def _write_config_key(key, val):
+    """Persist a value into the engine's ~/.config/monetag/config.json so local
+    runs use it too (reuses config.py's atomic writer via its CLI)."""
+    subprocess.run(
+        [sys.executable, "config.py", "--set", key, val],
+        capture_output=True, timeout=30,
+    )
+
+
+def _maybe_set_ipcook_secret(url, settings, deps, fixes_applied):
+    """Push the pasted IPCook URL to the IPCOOK_URL Actions secret on every
+    deployment so the CI loops (which read secrets, not local config) get it."""
+    token, acct_name = get_active_token()
+    if not deps:
+        _doc("info", "IPCook", "no deployments yet — secret set when you deploy [2]")
+        return
+    if not token:
+        _doc("warn", "IPCook", "no active account token — IPCOOK_URL secret not set")
+        return
+    accounts = load_json("accounts.json")
+    ok_cnt = 0
+    for name, dep in deps.items():
+        acct = accounts.get(dep.get("account", ""), {})
+        tok = token or acct.get("token", "")
+        owner = acct.get("username", dep.get("account", ""))
+        if not tok or not owner:
+            _doc("warn", f"IPCook secret @{name}", "no token for this deployment")
+            continue
+        ok, err = set_repo_secret(owner, name, tok, "IPCOOK_URL", url)
+        if ok:
+            ok_cnt += 1
+            fixes_applied.append(f"IPCOOK_URL secret @{name}")
+            _doc("ok", f"IPCook secret @{name}", "IPCOOK_URL set")
+        else:
+            _doc("warn", f"IPCook secret @{name}", err)
+    if ok_cnt and confirm("Re-dispatch the loop now so the fresh IPCook URL takes effect?"):
+        screen_dispatch()
 
 def screen_doctor():
     clear()
@@ -1589,8 +1667,60 @@ def screen_doctor():
             n_warn += 1
             _doc("warn", "Supabase", detail)
 
-    # ── 4. Monetag SmartLink ────────────────────────────────────────────────
-    print(f"\n  {C_BOLD}4) MONETAG SMARTLINK{C_RESET}")
+    # ── 4. IPCook (PRIMARY proxy source) ────────────────────────────────────
+    print(f"\n  {C_BOLD}4) IPCOOK PROXY (PRIMARY SOURCE){C_RESET}")
+    divider()
+    ipcook_url = settings.get("ipcook_url", "") or load_legacy_config().get("ipcook_url", "")
+    ic_ok, ic_count, ic_detail = _test_ipcook(ipcook_url)
+    if not ipcook_url:
+        n_warn += 1
+        _doc("warn", "IPCook", "not configured — this is the PRIMARY proxy source")
+        if confirm("Paste your IPCook genips URL now? (auto-setup)"):
+            val = prompt("IPCook genips URL (paste the full .../genips?...&n=10&sign=... link)")
+            if val:
+                ic_ok, ic_count, ic_detail = _test_ipcook(val)
+                if ic_ok:
+                    settings["ipcook_url"] = val.strip()
+                    save_json("settings.json", settings)
+                    try:
+                        _write_config_key("ipcook_url", val.strip())
+                    except Exception:
+                        pass
+                    fixes_applied.append("IPCook URL saved")
+                    n_warn -= 1
+                    n_ok += 1
+                    _doc("ok", "IPCook", ic_detail)
+                    _maybe_set_ipcook_secret(val.strip(), settings, deps, fixes_applied)
+                else:
+                    n_err += 1
+                    _doc("error", "IPCook", ic_detail)
+    elif ic_ok:
+        n_ok += 1
+        _doc("ok", "IPCook", ic_detail)
+    else:
+        n_warn += 1
+        _doc("warn", "IPCook", ic_detail)
+        if confirm("Paste a fresh IPCook URL to replace it? (auto-fix)"):
+            val = prompt("IPCook genips URL")
+            if val:
+                ic_ok, ic_count, ic_detail = _test_ipcook(val)
+                if ic_ok:
+                    settings["ipcook_url"] = val.strip()
+                    save_json("settings.json", settings)
+                    try:
+                        _write_config_key("ipcook_url", val.strip())
+                    except Exception:
+                        pass
+                    fixes_applied.append("IPCook URL replaced")
+                    _maybe_set_ipcook_secret(val.strip(), settings, deps, fixes_applied)
+                    n_warn -= 1
+                    n_ok += 1
+                    _doc("ok", "IPCook", ic_detail)
+                else:
+                    _doc("error", "IPCook", ic_detail)
+
+    # ── 5. Monetag SmartLink ────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}5) MONETAG SMARTLINK{C_RESET}")
     divider()
     sl = settings.get("smartlink_url") or ""
     if not sl:
@@ -1622,8 +1752,8 @@ def screen_doctor():
             n_warn += 1
             _doc("warn", "Monetag link", f"'{fixed}' does not look like a valid URL")
 
-    # ── 5. Traffic source ───────────────────────────────────────────────────
-    print(f"\n  {C_BOLD}5) TRAFFIC SOURCE{C_RESET}")
+    # ── 6. Traffic source ───────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}6) TRAFFIC SOURCE{C_RESET}")
     divider()
     ts = settings.get("traffic_source_url", "")
     if ts:
@@ -1638,8 +1768,8 @@ def screen_doctor():
         n_ok += 1
         _doc("ok", "Traffic source", "default (youtube); optional custom referrer boosts score")
 
-    # ── 6. Deployments ──────────────────────────────────────────────────────
-    print(f"\n  {C_BOLD}6) DEPLOYMENTS{C_RESET}")
+    # ── 7. Deployments ──────────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}7) DEPLOYMENTS{C_RESET}")
     divider()
     if not deps:
         n_ok += 1

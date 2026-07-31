@@ -40,8 +40,9 @@ def get_verified():
 
 
 def run_engine(proxy):
-    os.environ["MONETAG_PROXY"] = f"http://{proxy['ip']}:{proxy['port']}"
-    print(f"=== ENGINE (android) proxy={proxy['ip']}:{proxy['port']} ===", flush=True)
+    proxy_url = proxy.get("proxy") or f"http://{proxy['ip']}:{proxy['port']}"
+    os.environ["MONETAG_PROXY"] = proxy_url
+    print(f"=== ENGINE (android) proxy={proxy_url} source={proxy.get('source')} ===", flush=True)
     t0 = time.time()
     try:
         subprocess.run([

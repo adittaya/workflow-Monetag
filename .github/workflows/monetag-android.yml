@@ -48,6 +48,7 @@ env:
   MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
   MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '3' }}
   MONETAG_ROTATE_MODE: 'fast'
+  IPCOOK_URL: ${{ secrets.IPCOOK_URL || '' }}
   RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || '' }}
 
 jobs:
@@ -132,6 +133,9 @@ jobs:
             python3 config.py --set supabase_secret "$SUPABASE_SECRET"
             python3 config.py --set proxy_enabled true
             python3 config.py --set proxy_tier premium
+            if [ -n "$IPCOOK_URL" ]; then
+              python3 config.py --set ipcook_url "$IPCOOK_URL"
+            fi
 
             echo "=== START APPIUM ==="
             nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &

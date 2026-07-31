@@ -38,6 +38,7 @@ Output:
     exit 3  mixed / no views produced
 """
 
+import base64
 import json
 import os
 import random
@@ -45,6 +46,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -81,6 +83,30 @@ PROXY = os.environ.get("MONETAG_PROXY", "")
 PROXY_HOST = PROXY.replace("https://", "").replace("http://", "").split(":")[0] if PROXY else ""
 PROXY_IP = PROXY_HOST
 PROXY_PORT = int(PROXY.split(":")[-1]) if PROXY and ":" in PROXY.split("//")[-1] else 0
+PROXY_USERINFO = ""
+PROXY_SOURCE = "none"
+
+
+def _parse_proxy(raw):
+    """Parse a MONETAG_PROXY value into (host, port, source, userinfo).
+    Supports plain http://ip:port (Supabase) and credentialed
+    http://user:pass@host:port (IPCook)."""
+    if not raw:
+        return "", 0, "none", ""
+    s = raw.replace("https://", "").replace("http://", "")
+    userinfo = ""
+    if "@" in s:
+        userinfo, s = s.rsplit("@", 1)
+    host = s
+    port = 0
+    if ":" in s:
+        host, _, port_s = s.rpartition(":")
+        try:
+            port = int(port_s)
+        except Exception:
+            port = 0
+    source = "ipcook" if userinfo else "supabase"
+    return host, port, source, userinfo
 
 # Real-Android mode (MONETAG_ANDROID=1): drive a booted emulator's real Chrome
 # through Appium instead of a local desktop-headless Chromium. The device IS the
@@ -334,6 +360,9 @@ def report_proxy_failure(reason):
     log(f"proxy failure #{proxy_failures}: {reason} ({PROXY_IP}:{PROXY_PORT})")
     if not proxy_punished and PROXY_PORT:
         proxy_punished = True
+        if PROXY_SOURCE == "ipcook":
+            log("skipping mark_dead (ipcook proxy — rotating residential, not in Supabase pool)")
+            return
         try:
             mark_dead(PROXY_IP, PROXY_PORT, reason)
         except Exception:
@@ -1030,7 +1059,7 @@ def _create_driver():
         _create_android_driver()
         return
     kind = "mobile"
-    geo = _lookup_proxy_geo(PROXY_IP)
+    geo = None if PROXY_SOURCE == "ipcook" else _lookup_proxy_geo(PROXY_IP)
     profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
     profile["uaMeta"] = _ua_metadata(profile)
     if geo:
@@ -1140,10 +1169,191 @@ def _create_driver():
     driver.execute_script(stealth_js)
 
 
+class _LocalForwardProxy:
+    """Minimal authenticated HTTP proxy. Android's global http_proxy setting
+    cannot carry credentials, so for IPCook we listen on the host loopback and
+    expose it to the device via `adb reverse`; each device connection gets
+    Proxy-Authorization injected into the upstream CONNECT (rotating residential
+    exit IP per connection)."""
+
+    def __init__(self, upstream_host, upstream_port, userinfo):
+        self.upstream = (upstream_host, upstream_port)
+        self.cred = "Basic " + base64.b64encode(userinfo.encode()).decode()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(32)
+        self.port = self.sock.getsockname()[1]
+        self.running = True
+        self._accept = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept.start()
+
+    def _accept_loop(self):
+        self.sock.settimeout(1.0)
+        while self.running:
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def _recv_headers(conn):
+        data = b""
+        while b"\r\n\r\n" not in data and len(data) < 65536:
+            try:
+                chunk = conn.recv(4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            data += chunk
+        head, _, rest = data.partition(b"\r\n\r\n")
+        return head, rest
+
+    def _handle(self, conn):
+        try:
+            conn.settimeout(30)
+            head, rest = self._recv_headers(conn)
+            if not head:
+                return
+            lines = head.split(b"\r\n")
+            reqline = lines[0]
+            parts = reqline.split(b" ")
+            if not parts:
+                return
+            method = parts[0].upper()
+            target = parts[1]
+            up = socket.create_connection(self.upstream, timeout=30)
+            headers = [l for l in lines[1:]
+                       if not l.lower().startswith(b"proxy-authorization")]
+            if method == b"CONNECT":
+                up.sendall(b"CONNECT " + target + b" HTTP/1.1\r\nHost: " + target +
+                           b"\r\nProxy-Authorization: " + self.cred.encode() + b"\r\n\r\n")
+                resp, _ = self._recv_headers(up)
+                if not resp or not (resp.startswith(b"HTTP/1.1 200") or resp.startswith(b"HTTP/1.0 200")):
+                    conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    up.close()
+                    return
+                conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                if rest:
+                    up.sendall(rest)
+            else:
+                auth = b"\r\nProxy-Authorization: " + self.cred.encode()
+                up.sendall(reqline + b"\r\n" + b"\r\n".join(headers) + auth + b"\r\n\r\n")
+                if rest:
+                    up.sendall(rest)
+            self._relay(conn, up)
+        except Exception:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _relay(a, b):
+        def pump(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except OSError:
+                pass
+            finally:
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+        t1 = threading.Thread(target=pump, args=(a, b), daemon=True)
+        t2 = threading.Thread(target=pump, args=(b, a), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        try:
+            a.close()
+            b.close()
+        except OSError:
+            pass
+
+    def stop(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+_android_fwd = None
+
+
+def _start_android_forward_proxy():
+    """Bind the IPCook credentialed proxy to the host loopback and expose it to
+    the device via adb reverse (Chrome hits 127.0.0.1:<port>, no auth needed)."""
+    global _android_fwd
+    _stop_android_forward_proxy()
+    host, port, source, userinfo = _parse_proxy(os.environ.get("MONETAG_PROXY", ""))
+    if source != "ipcook" or not userinfo or not host or not port:
+        return False
+    fwd = _LocalForwardProxy(host, port, userinfo)
+    try:
+        subprocess.run(
+            ["adb", "-s", ANDROID_UDID, "reverse",
+             f"tcp:{fwd.port}", f"tcp:{fwd.port}"],
+            capture_output=True, timeout=15, check=True,
+        )
+    except Exception as e:
+        log(f"adb reverse failed: {e}")
+        fwd.stop()
+        return False
+    subprocess.run(
+        ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
+         "http_proxy", f"127.0.0.1:{fwd.port}"],
+        capture_output=True, timeout=15,
+    )
+    _android_fwd = fwd
+    log(f"device proxy via local forward: 127.0.0.1:{fwd.port} -> {host}:{port} (ipcook auth)")
+    return True
+
+
+def _stop_android_forward_proxy():
+    global _android_fwd
+    if _android_fwd is not None:
+        try:
+            _android_fwd.stop()
+        except Exception:
+            pass
+        try:
+            subprocess.run(
+                ["adb", "-s", ANDROID_UDID, "reverse", "--remove",
+                 f"tcp:{_android_fwd.port}"],
+                capture_output=True, timeout=15,
+            )
+        except Exception:
+            pass
+        _android_fwd = None
+    try:
+        subprocess.run(
+            ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
+             "http_proxy", ":0"],
+            capture_output=True, timeout=15,
+        )
+    except Exception:
+        pass
+
+
 def _set_device_proxy():
     """Android Chrome ignores --proxy-server (ERR_NO_SUPPORTED_PROXIES); the
-    proxy must be set device-wide. This routes ALL emulator network traffic
-    through the current MONETAG_PROXY, including Chrome."""
+    proxy must be set device-wide. IPCook creds are injected via the local
+    forward proxy (adb reverse); Supabase ip:port is set directly. This routes
+    ALL emulator network traffic through the current MONETAG_PROXY."""
+    if PROXY_SOURCE == "ipcook" and PROXY_USERINFO:
+        _start_android_forward_proxy()
+        return
     try:
         subprocess.run(
             ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
@@ -1156,14 +1366,7 @@ def _set_device_proxy():
 
 
 def _clear_device_proxy():
-    try:
-        subprocess.run(
-            ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
-             "http_proxy", ":0"],
-            capture_output=True, timeout=15,
-        )
-    except Exception:
-        pass
+    _stop_android_forward_proxy()
 
 
 def _create_android_driver():
@@ -1176,7 +1379,7 @@ def _create_android_driver():
     chromedriver-on-Android exposes a reduced command surface and the whole
     point is NOT to emulate."""
     global driver, profile
-    geo = _lookup_proxy_geo(PROXY_IP)
+    geo = None if PROXY_SOURCE == "ipcook" else _lookup_proxy_geo(PROXY_IP)
     profile = {
         "deviceKind": "mobile",
         "name": os.environ.get("MONETAG_ANDROID_DEVICE", "Pixel 7"),
@@ -1958,7 +2161,10 @@ def run_view_cycle(cycle_idx):
             report_proxy_failure(f"view-{verdict.lower()}")
 
     if PROXY_IP and PROXY_PORT:
-        mark_proxy_used(PROXY_IP, PROXY_PORT)
+        if PROXY_SOURCE == "ipcook":
+            log("skipping mark_proxy_used (ipcook — rotating creds, no pool used-mark)")
+        else:
+            mark_proxy_used(PROXY_IP, PROXY_PORT)
 
     try:
         driver.quit()
@@ -1973,7 +2179,7 @@ def run_view_cycle(cycle_idx):
 # ══════════════════════════════════════════════════════════════
 
 def parse_args(argv):
-    global SMARTLINK_URL, VIEWS_TOTAL, VERIFY_MODE, TRAFFIC_SOURCE, DEBUG, PROXY, PROXY_IP, PROXY_PORT
+    global SMARTLINK_URL, VIEWS_TOTAL, VERIFY_MODE, TRAFFIC_SOURCE, DEBUG, PROXY, PROXY_IP, PROXY_PORT, PROXY_USERINFO, PROXY_SOURCE
 
     args = list(argv[1:])
     url_arg = ""
@@ -2019,8 +2225,7 @@ def parse_args(argv):
     DEBUG = DEBUG or os.environ.get("MONETAG_DEBUG") == "1"
 
     PROXY = os.environ.get("MONETAG_PROXY", "")
-    PROXY_IP = PROXY.replace("https://", "").replace("http://", "").split(":")[0] if PROXY else ""
-    PROXY_PORT = int(PROXY.split(":")[-1]) if PROXY and ":" in PROXY.split("//")[-1] else 0
+    PROXY_IP, PROXY_PORT, PROXY_SOURCE, PROXY_USERINFO = _parse_proxy(PROXY)
 
     if not SMARTLINK_URL:
         print("Usage: python3 monetag_automation.py <smartlink_url> [--views N] [--verify-mode strict|lenient] [--traffic-source ...] [--debug]",
@@ -2033,7 +2238,7 @@ def parse_args(argv):
 
 
 def main():
-    global SMARTLINK_URL, VIEWS_TOTAL
+    global SMARTLINK_URL, VIEWS_TOTAL, PROXY_IP, PROXY_PORT, PROXY_SOURCE, PROXY_USERINFO
     parse_args(sys.argv)
 
     log("=" * 50)
@@ -2076,10 +2281,10 @@ def main():
                         picked = None
 
                     if picked:
-                        os.environ["MONETAG_PROXY"] = f"http://{picked['ip']}:{picked['port']}"
-                        PROXY_IP = picked["ip"]
-                        PROXY_PORT = int(picked["port"])
-                        log(f"new proxy: {PROXY_IP}:{PROXY_PORT}")
+                        proxy_url = picked.get("proxy") or f"http://{picked['ip']}:{picked['port']}"
+                        os.environ["MONETAG_PROXY"] = proxy_url
+                        PROXY_IP, PROXY_PORT, PROXY_SOURCE, PROXY_USERINFO = _parse_proxy(proxy_url)
+                        log(f"new proxy: {PROXY_IP}:{PROXY_PORT} (source={PROXY_SOURCE})")
                     else:
                         # Pool exhausted / rotation failed — do NOT reuse the
                         # previous proxy (already marked used). Fail the view;
