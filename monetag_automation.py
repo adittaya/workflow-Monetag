@@ -572,13 +572,19 @@ def human_delay(min_ms, max_ms):
     ms(rand(min_ms, max_ms))
 
 
+_pointer = [0, 0]
+
+
 def bezier_move(from_x, from_y, to_x, to_y):
     steps = rand(15, 35)
-    cp1x = from_x + (to_x - from_x) * 0.3 + (random.random() - 0.5) * 80
-    cp1y = from_y + (to_y - from_y) * 0.3 + (random.random() - 0.5) * 80
-    cp2x = from_x + (to_x - from_x) * 0.7 + (random.random() - 0.5) * 60
-    cp2y = from_y + (to_y - from_y) * 0.7 + (random.random() - 0.5) * 60
-    prev_x, prev_y = from_x, from_y
+    start_x, start_y = _pointer[0], _pointer[1]
+    target_x = start_x + (to_x - from_x)
+    target_y = start_y + (to_y - from_y)
+    cp1x = start_x + (target_x - start_x) * 0.3 + (random.random() - 0.5) * 80
+    cp1y = start_y + (target_y - start_y) * 0.3 + (random.random() - 0.5) * 80
+    cp2x = start_x + (target_x - start_x) * 0.7 + (random.random() - 0.5) * 60
+    cp2y = start_y + (target_y - start_y) * 0.7 + (random.random() - 0.5) * 60
+    prev_x, prev_y = start_x, start_y
     try:
         for i in range(1, steps + 1):
             t = i / steps
@@ -587,15 +593,62 @@ def bezier_move(from_x, from_y, to_x, to_y):
             mt = 1 - t
             mt2 = mt * mt
             mt3 = mt2 * mt
-            x = mt3 * from_x + 3 * mt2 * t * cp1x + 3 * mt * t2 * cp2x + t3 * to_x
-            y = mt3 * from_y + 3 * mt2 * t * cp1y + 3 * mt * t2 * cp2y + t3 * to_y
+            x = mt3 * start_x + 3 * mt2 * t * cp1x + 3 * mt * t2 * cp2x + t3 * target_x
+            y = mt3 * start_y + 3 * mt2 * t * cp1y + 3 * mt * t2 * cp2y + t3 * target_y
             dx, dy = int(x - prev_x), int(y - prev_y)
             if dx or dy:
                 ActionChains(driver).move_by_offset(dx, dy).perform()
             prev_x, prev_y = x, y
+            _pointer[0], _pointer[1] = int(x), int(y)
             ms(rand(5, 20))
     except Exception:
         pass
+
+
+def random_click():
+    """Click a random visible interactive element (link/button) like a human."""
+    try:
+        cds = safe_eval(r"""
+            var els = Array.from(document.querySelectorAll(
+                'a, button, [role="button"], input[type="submit"], .btn, [onclick]'))
+                .filter(function(e) {
+                    var r = e.getBoundingClientRect();
+                    if (!r || r.width < 5 || r.height < 5) return false;
+                    if (r.top < -20 || r.bottom > window.innerHeight + 20) return false;
+                    var s = getComputedStyle(e);
+                    if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') return false;
+                    if (e.tagName === 'A') {
+                        if (!e.href || e.href.indexOf('javascript:') === 0) return false;
+                        try {
+                            var u = new URL(e.href, location.href);
+                            var rd = function(h) { var p = h.split('.'); return p.length > 2 ? p.slice(-2).join('.') : h; };
+                            if (rd(u.hostname) !== rd(location.hostname)) return false;
+                        } catch (err) { return false; }
+                    }
+                    return true;
+                })
+                .map(function(e) {
+                    var r = e.getBoundingClientRect();
+                    return {tag: e.tagName,
+                            text: (e.innerText || e.value || '').trim().slice(0, 40),
+                            x: Math.round(r.left + r.width / 2),
+                            y: Math.round(r.top + r.height / 2)};
+                });
+            return JSON.stringify(els);
+        """)
+        els = json.loads(cds or "[]")
+        if not els:
+            return None
+        el = random.choice(els)
+        x, y = int(el["x"]), int(el["y"])
+        human_delay(250, 700)
+        bezier_move(0, 0, x, y)
+        human_delay(100, 350)
+        ActionChains(driver).click().perform()
+        log(f"random click: {el['tag']} '{el['text']}' @({x},{y})")
+        return el
+    except Exception:
+        return None
 
 
 def human_scroll():
@@ -622,6 +675,7 @@ def human_read(duration_sec=20, known_height=0):
         return
     try:
         scroll_count = rand(8, 20)
+        clicked_any = False
         for i in range(scroll_count):
             if time.time() - read_start >= dur:
                 break
@@ -644,8 +698,16 @@ def human_read(duration_sec=20, known_height=0):
                     safe_eval("document.dispatchEvent(new KeyboardEvent('keydown', {key:'PageDown', keyCode:34, bubbles:true}));")
                     ms(rand(80, 200))
                     safe_eval("document.dispatchEvent(new KeyboardEvent('keyup', {key:'PageDown', keyCode:34, bubbles:true}));")
-            pause = rand(1500, 4000)
-            ms(pause)
+            # Random human click on a real interactive element while reading
+            if random.random() < 0.45:
+                if random_click() is not None:
+                    clicked_any = True
+                ms(rand(1000, 2500))
+            else:
+                pause = rand(1500, 4000)
+                ms(pause)
+        if not clicked_any and time.time() - read_start < dur:
+            random_click()
     except Exception as e:
         log(f"human read error: {str(e)[:60]}")
 
@@ -1332,13 +1394,14 @@ def run_view_cycle(cycle_idx):
     except Exception:
         pass
 
-    # Dwell — human-like read on the landing page, capped so the whole
-    # cycle fits inside the 60s budget (chain may already have used some).
+    # Dwell — human-like reading + random clicks on the landing page, capped
+    # so the whole cycle fits the 60s budget (chain may already have used some;
+    # ~8s margin left for human_scroll + verify).
     hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "60"))
     cycle_deadline = cycle_start + hard_timeout
     dwell_secs = rand(10, 25)
     remaining = cycle_deadline - time.time()
-    dwell_secs = max(1, min(dwell_secs, int(remaining)))
+    dwell_secs = max(1, min(dwell_secs, int(remaining) - 8))
     snap = monitor.snapshot()
     known_height = snap.get("height", 0)
     human_read(duration_sec=dwell_secs, known_height=known_height)
