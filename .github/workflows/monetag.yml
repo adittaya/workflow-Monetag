@@ -42,6 +42,7 @@ env:
   SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET }}
   MONETAG_HEADLESS: '1'
   MONETAG_NONINTERACTIVE: '1'
+  MONETAG_DEVICE: 'desktop'
   MONETAG_SMARTLINK_URL: ${{ github.event.inputs.smartlink_url || github.event.client_payload.smartlink_url || secrets.MONETAG_SMARTLINK_URL || '' }}
   MONETAG_TRAFFIC_SOURCE: ${{ github.event.inputs.traffic_source || github.event.client_payload.traffic_source || 'youtube' }}
   MONETAG_REFERER: ${{ github.event.inputs.traffic_source_url || github.event.client_payload.traffic_source_url || secrets.MONETAG_REFERER || '' }}
