@@ -1,0 +1,238 @@
+name: Monetag SmartLink Loop
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      smartlink_url:
+        description: 'Monetag SmartLink URL (go.oclasrv.com/afu.php?zoneid=XXXXX)'
+        required: false
+        default: ''
+      traffic_source:
+        description: 'youtube|google|facebook|twitter|direct'
+        required: false
+        default: 'youtube'
+      verify_mode:
+        description: 'strict|lenient'
+        required: false
+        default: 'strict'
+      views:
+        description: 'Number of view cycles to run'
+        required: false
+        default: '1'
+      no_relay:
+        description: 'Set to "1" to skip the relay (test mode)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [relay]
+
+concurrency:
+  group: monetag-${{ github.repository }}${{ github.event.inputs.no_relay && '-test' || '' }}
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET }}
+  MONETAG_HEADLESS: '1'
+  MONETAG_NONINTERACTIVE: '1'
+  MONETAG_SMARTLINK_URL: ${{ github.event.inputs.smartlink_url || github.event.client_payload.smartlink_url || secrets.MONETAG_SMARTLINK_URL || '' }}
+  MONETAG_TRAFFIC_SOURCE: ${{ github.event.inputs.traffic_source || github.event.client_payload.traffic_source || 'youtube' }}
+  MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
+  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '1' }}
+  RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || github.repository }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate SmartLink URL
+        run: |
+          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
+            echo "::error::MONETAG_SMARTLINK_URL is empty — cannot continue"
+            exit 1
+          fi
+          echo "SmartLink: $MONETAG_SMARTLINK_URL"
+          echo "Traffic source: $MONETAG_TRAFFIC_SOURCE"
+          echo "Verify mode: $MONETAG_VERIFY_MODE"
+          echo "Views: $MONETAG_VIEWS"
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::warning::SUPABASE_URL is empty — proxy will not work"
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get remove -y chromium-browser chromium-chromedriver >/dev/null 2>&1 || true
+          wget -q -O /tmp/chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y -qq /tmp/chrome.deb >/dev/null 2>&1
+          sudo ln -sf /usr/bin/google-chrome /usr/bin/chromium-browser 2>/dev/null || true
+          google-chrome --version
+
+      - name: Install chromedriver + Python deps
+        run: |
+          pip install --break-system-packages -q selenium webdriver-manager requests urllib3 2>/dev/null \
+            || pip install -q selenium webdriver-manager requests urllib3
+          python3 -c "from webdriver_manager.chrome import ChromeDriverManager; print(ChromeDriverManager().install())"
+
+      - name: Configure Supabase
+        run: |
+          python3 config.py --set supabase_url "$SUPABASE_URL"
+          python3 config.py --set supabase_key "$SUPABASE_KEY"
+          python3 config.py --set supabase_secret "$SUPABASE_SECRET"
+          python3 config.py --set proxy_enabled true
+          python3 config.py --set proxy_tier premium
+
+      - name: Get proxy
+        id: proxy
+        run: |
+          PROXY=$(python3 proxy_rotator.py premium | tail -1)
+          echo "proxy=$PROXY" >> $GITHUB_OUTPUT
+          echo "Got proxy: $PROXY"
+
+      - name: Run automation (with proxy retry)
+        id: automate
+        timeout-minutes: 20
+        env:
+          CHROMIUM_PATH: /usr/bin/google-chrome
+        run: |
+          MAX_ATTEMPTS=3
+          MIN_RUNTIME=120
+          CURRENT_PROXY="${{ steps.proxy.outputs.proxy }}"
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            PROXY="$CURRENT_PROXY"
+            if [ -z "$PROXY" ]; then
+              echo "No proxy available, running direct..."
+              unset MONETAG_PROXY
+            else
+              export MONETAG_PROXY="http://$PROXY"
+            fi
+
+            echo "=== Attempt $attempt/$MAX_ATTEMPTS (proxy: $PROXY) ==="
+            echo "MONETAG_PROXY=$MONETAG_PROXY"
+            START=$(date +%s)
+            timeout 1180 python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
+              --views "$MONETAG_VIEWS" \
+              --verify-mode "$MONETAG_VERIFY_MODE" \
+              --traffic-source "$MONETAG_TRAFFIC_SOURCE" 2>&1 || true
+            END=$(date +%s)
+            ELAPSED=$((END - START))
+
+            echo "Attempt $attempt finished in ${ELAPSED}s"
+            if [ "$ELAPSED" -ge "$MIN_RUNTIME" ]; then
+              echo "Ran for ${ELAPSED}s (>= ${MIN_RUNTIME}s) — proxy worked"
+              break
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "Ran only ${ELAPSED}s (< ${MIN_RUNTIME}s) — proxy likely blocked, rotating..."
+              blacklisted="$PROXY"
+              NEW_PROXY=$(python3 proxy_rotator.py premium | tail -1)
+              echo "New proxy: $NEW_PROXY (blacklisted: $blacklisted)"
+              CURRENT_PROXY="$NEW_PROXY"
+            fi
+          done
+
+          # If no verified views yet, try one more time WITHOUT proxy
+          VERIFIED=0
+          if [ -f view_report.json ]; then
+            VERIFIED=$(python3 -c "import json; r=json.load(open('view_report.json')); print(r['summary'].get('verified_or_likely',0))" 2>/dev/null || echo 0)
+          fi
+          if [ "$VERIFIED" -lt "$MONETAG_VIEWS" ]; then
+            echo "=== Trying without proxy (direct connection) ==="
+            unset MONETAG_PROXY
+            timeout 1180 python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
+              --views "$MONETAG_VIEWS" \
+              --verify-mode "$MONETAG_VERIFY_MODE" \
+              --traffic-source "$MONETAG_TRAFFIC_SOURCE" 2>&1 || true
+          fi
+
+          # Capture report summary for the summary step
+          if [ -f view_report.json ]; then
+            VERDICTS=$(python3 -c "import json; r=json.load(open('view_report.json')); s=r['summary']; print('verified_or_likely=%d' % s.get('verified_or_likely',0))" 2>/dev/null || echo "verified_or_likely=0")
+            echo "status=$(echo "$VERDICTS" | cut -d= -f2 | awk '$1>0 {print "success"} $1==0 {print "failure"}')" >> $GITHUB_OUTPUT
+            echo "destination=$VERDICTS" >> $GITHUB_OUTPUT
+            echo "Verdict summary: $VERDICTS"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "No view report produced"
+          fi
+
+      - name: Relay — trigger next run
+        if: always() && github.event.inputs.no_relay != '1'
+        env:
+          TRIGGER_TOKEN: ${{ secrets.LOOP_TRIGGER_TOKEN }}
+        run: |
+          if [ -z "$RELAY_TARGET_REPO" ]; then
+            echo "::warning::RELAY_TARGET_REPO not set and github.repository empty — relay cannot fire"
+            exit 0
+          fi
+          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
+            echo "::warning::MONETAG_SMARTLINK_URL empty — relay would fire with empty payload, skipping"
+            exit 0
+          fi
+
+          # Preserve smartlink + config through the relay chain
+          PAYLOAD='{"event_type":"relay","client_payload":{"smartlink_url":"'"${MONETAG_SMARTLINK_URL}"'","traffic_source":"'"${MONETAG_TRAFFIC_SOURCE}"'","verify_mode":"'"${MONETAG_VERIFY_MODE}"'","views":"'"${MONETAG_VIEWS}"'"}}'
+
+          # Try LOOP_TRIGGER_TOKEN first, then fall back to GITHUB_TOKEN
+          for TOKEN_VAR in TRIGGER_TOKEN GITHUB_TOKEN; do
+            TOKEN="${!TOKEN_VAR}"
+            if [ -z "$TOKEN" ]; then
+              echo "$TOKEN_VAR is empty — skipping"
+              continue
+            fi
+            echo "Trying relay with $TOKEN_VAR..."
+            for attempt in 1 2 3; do
+              HTTP_CODE=$(curl -s -o /tmp/relay_resp.txt -w "%{http_code}" -X POST \
+                -H "Authorization: token $TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${RELAY_TARGET_REPO}/dispatches" \
+                -d "$PAYLOAD")
+              echo "  Attempt $attempt: HTTP $HTTP_CODE"
+              if [ "$HTTP_CODE" = "204" ]; then
+                echo "Relay dispatched successfully via $TOKEN_VAR"
+                exit 0
+              fi
+              if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ]; then
+                BODY=$(cat /tmp/relay_resp.txt 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('message',''))" 2>/dev/null || echo "")
+                echo "  $TOKEN_VAR rejected: $BODY"
+                break
+              fi
+              sleep 3
+            done
+          done
+          echo "::warning::Relay failed — both LOOP_TRIGGER_TOKEN and GITHUB_TOKEN failed. Check token scopes (need 'repo' scope for repository_dispatch)"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Monetag SmartLink Result" >> $GITHUB_STEP_SUMMARY
+          if [ -f view_report.json ]; then
+            python3 - <<'PYEOF' >> $GITHUB_STEP_SUMMARY
+          import json
+          r = json.load(open("view_report.json"))
+          s = r["summary"]
+          print("### Verdict summary")
+          for k, v in s.items():
+              if ":" not in k:
+                  print(f"- {k}: {v}")
+          print(f"\nSmartLink: {r['smartlink_url']}")
+          print(f"Traffic source: {r['traffic_source']}")
+          PYEOF
+          else
+            echo "No view report produced" >> $GITHUB_STEP_SUMMARY
+          fi
