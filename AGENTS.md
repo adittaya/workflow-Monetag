@@ -119,9 +119,10 @@
 
 ## Notes
 
-- Repo (future): `adittaya/workflow-monetag` — current working tree uncommitted on empty `main`
-- Supabase `proxy_results` table needs `monetag_ok` column (added in schema.sql)
-- `monetag_proxy_state` table needs to be created in Supabase (schema.sql)
-- Proxy pool ~500 proxies, most dead, ~10 alive per rotation (inherited from VPLink era)
-- `proxy_rotator.py --test ip:port` now validates via SmartLink redirect when `MONETAG_SMARTLINK_URL` is set, else plain monetag.com reachability
-- TUI legacy config fallback now reads `~/.config/monetag/config.json`
+- Repo: `adittaya/workflow-monetag` — pushed to GitHub (PUBLIC), commits: init, schema fix, pool-share fix, verify fix
+- LIVE TESTED 2026-07-31: SmartLink `https://omg10.com/4/11465287` via Supabase pool → AliExpress offer, **VIEW_VERIFIED score=100**; inline smartlink views score LIKELY
+- Config: credentials configured locally at `~/.config/monetag/config.json` (gitignored)
+- Supabase: `proxy_results` (19 proxies, all `monetag_ok=true`) + `monetag_proxy_state` (empty) — both tiers share same pool
+- Local pool cleanup: 2 dead proxies deleted during testing; ~17 alive
+- Fixes shipped: PageMonitor re-install on landing document; `left_network` partial credit for inline smartlink offers; `omg10.com` added to SMARTLINK/AD_NETWORK domains; tier fields ignored (OR query)
+- `proxy_rotator.py --test ip:port` validates via SmartLink redirect when `MONETAG_SMARTLINK_URL` is set, else plain monetag.com reachability
