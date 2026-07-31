@@ -913,7 +913,7 @@ def _build_stealth_js(p):
                             brands: brands,
                             mobile: true,
                             platform: 'Android',
-                            getHighEntropyValues: function() {{ return Promise.resolve({{}}); }},
+                            getHighEntropyValues: function() {{ return Promise.resolve(p.uaMeta); }},
                             toJSON: function() {{ return {{ brands: brands, mobile: true, platform: 'Android' }}; }}
                         }};
                     }}
@@ -1083,6 +1083,7 @@ def _create_driver():
     kind = _pick_device_kind()
     geo = _lookup_proxy_geo(PROXY_IP)
     profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
+    profile["uaMeta"] = _ua_metadata(profile)
     if geo:
         log(f"ip geo: {geo.get('country')} {geo.get('timezone')}")
     log(f"profile: {profile['deviceKind']} {profile['name']} "
@@ -1195,6 +1196,53 @@ def _create_driver():
     driver.execute_script(stealth_js)
 
 
+def _ua_metadata(profile):
+    """Build a coherent userAgentMetadata dict (Chrome's userAgentData) from the
+    emulated profile so the browser's NATIVE userAgentData reports the claimed
+    device, not the real host OS. Chrome only honors this when it is passed via
+    Emulation.setUserAgentOverride.userAgentMetadata."""
+    ua = profile.get("userAgent", "")
+    m = re.search(r"Chrome/(\d+)\.(\d+)\.(\d+)\.(\d+)", ua)
+    major = m.group(1) if m else "151"
+    full = m.group(0).split("/", 1)[1] if m else "151.0.0.0"
+    am = re.search(r"Android (\d+)", ua)
+    plat = profile.get("platform", "")
+    is_mobile = profile.get("deviceKind") == "mobile"
+    if is_mobile:
+        platform = "Android"
+        platform_version = (am.group(1) if am else "13") + ".0.0"
+        arch, model, bitness = "arm", profile.get("name", ""), ""
+    elif plat == "Win32":
+        platform, platform_version = "Windows", "10.0.0"
+        arch, model, bitness = "x86", "", "64"
+    elif plat == "MacIntel":
+        platform, platform_version = "macOS", "15.3.0"
+        arch, model, bitness = "x86", "", "64"
+    else:
+        platform, platform_version = "Linux", "0.0.0"
+        arch, model, bitness = "x86", "", "64"
+
+    def brands(v):
+        return [
+            {"brand": "Chromium", "version": v},
+            {"brand": "Google Chrome", "version": v},
+            {"brand": "Not)A;Brand", "version": "24"},
+        ]
+
+    return {
+        "brands": brands(major),
+        "fullVersionList": brands(major),
+        "fullVersion": full,
+        "platform": platform,
+        "platformVersion": platform_version,
+        "architecture": arch,
+        "model": model,
+        "mobile": bool(is_mobile),
+        "bitness": bitness,
+        "wow64": False,
+    }
+
+
 def _apply_cdp_profile(profile):
     """Push coherent CDP overrides so the browser matches the emulated device:
     timezone, locale, UA/platform, touch, metrics and (when the proxy IP gave
@@ -1209,7 +1257,9 @@ def _apply_cdp_profile(profile):
         pass
     try:
         driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent": profile["userAgent"], "platform": profile["platform"],
+            "userAgent": profile["userAgent"],
+            "platform": profile["platform"],
+            "userAgentMetadata": _ua_metadata(profile),
         })
     except Exception:
         pass
