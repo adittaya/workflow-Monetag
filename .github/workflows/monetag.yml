@@ -47,7 +47,7 @@ env:
   MONETAG_REFERER: ${{ github.event.inputs.traffic_source_url || github.event.client_payload.traffic_source_url || secrets.MONETAG_REFERER || '' }}
   MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
   MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '1' }}
-  RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || github.repository }}
+  RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || '' }}
 
 jobs:
   run:
@@ -202,15 +202,12 @@ jobs:
             echo "::warning::RELAY_TARGET_REPO not set and github.repository empty — relay cannot fire"
             exit 0
           fi
-          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
-            echo "::warning::MONETAG_SMARTLINK_URL empty — relay would fire with empty payload, skipping"
+          if [ -z "$RELAY_TARGET_REPO" ]; then
+            echo "::warning::RELAY_TARGET_REPO secret not set — relay skipped. Deployed monetag-* repos set this automatically (self-loop = continuous 24/7)."
             exit 0
           fi
-
-          # Never relay to the repo running the job (default RELAY_TARGET_REPO
-          # is github.repository) — that would create an infinite loop.
-          if [ "$RELAY_TARGET_REPO" = "$GITHUB_REPOSITORY" ]; then
-            echo "::warning::RELAY_TARGET_REPO equals this repo ($GITHUB_REPOSITORY) — skipping relay to avoid an infinite self-loop. Set RELAY_TARGET_REPO to a sink/dedicated repo to enable relay."
+          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
+            echo "::warning::MONETAG_SMARTLINK_URL empty — relay would fire with empty payload, skipping"
             exit 0
           fi
 
