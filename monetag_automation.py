@@ -25,6 +25,11 @@ Env vars (CI / headless):
     MONETAG_HEADLESS        "1" to force headless
     MONETAG_DEBUG           "1" to save screenshots
     MONETAG_HARD_TIMEOUT    per-cycle seconds cap (default: 60)
+    ADSPOWER_PROFILE_ID     when set, drive ONE fixed AdsPower profile via its
+                            Local API (default http://127.0.0.1:50325, override
+                            with ADSPOWER_API_BASE). MONETAG_PROXY is bound to
+                            the profile per view via launch args; the profile's
+                            own device fingerprint is used (no local emulation).
 
 Output:
     view_report.json  — per-cycle view records + aggregate summary
@@ -74,6 +79,15 @@ PROXY = os.environ.get("MONETAG_PROXY", "")
 PROXY_HOST = PROXY.replace("https://", "").replace("http://", "").split(":")[0] if PROXY else ""
 PROXY_IP = PROXY_HOST
 PROXY_PORT = int(PROXY.split(":")[-1]) if PROXY and ":" in PROXY.split("//")[-1] else 0
+
+# ── AdsPower mode ──
+# When ADSPOWER_PROFILE_ID is set, the engine drives the SAME fixed AdsPower
+# profile every view (one stable device fingerprint), binding the current
+# MONETAG_PROXY to it via AdsPower launch args. AdsPower runs locally on the
+# same host (CI runner / VPS) and exposes its Local API on ADSPOWER_API_BASE.
+ADSPOWER_PROFILE_ID = os.environ.get("ADSPOWER_PROFILE_ID", "").strip()
+ADSPOWER_API_BASE = os.environ.get("ADSPOWER_API_BASE", "http://127.0.0.1:50325")
+ADS_POWER = bool(ADSPOWER_PROFILE_ID)
 
 proxy_failures = 0
 proxy_blocked = False
@@ -330,6 +344,8 @@ def _signal_handler(sig, frame):
             driver.quit()
         except Exception:
             pass
+    if ADS_POWER:
+        _ads_power_stop()
     sys.exit(130)
 
 
@@ -979,11 +995,91 @@ def _lookup_proxy_geo(ip):
 
 
 # ══════════════════════════════════════════════════════════════
+#  AdsPower Local API — drive one fixed profile, bind proxy per view
+# ══════════════════════════════════════════════════════════════
+
+def _ads_power_api(path, params=None):
+    """Call the AdsPower Local API. Returns parsed JSON or raises."""
+    import urllib.request
+    import urllib.parse
+    url = ADSPOWER_API_BASE + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _ads_power_stop():
+    try:
+        _ads_power_api("/api/v1/browser/stop", {"user_id": ADSPOWER_PROFILE_ID})
+    except Exception:
+        pass
+
+
+def _ads_power_start(proxy):
+    """Start the fixed AdsPower profile with the session proxy bound via launch
+    args. Returns (debuggerAddress, data). The profile's own fingerprint
+    (device/OS/TLS) is left untouched — the proxy rides on the command line."""
+    _ads_power_stop()
+    launch = [f"--proxy-server={proxy}"] if proxy else []
+    data = _ads_power_api("/api/v1/browser/start", {
+        "user_id": ADSPOWER_PROFILE_ID,
+        "open_tabs": 1,
+        "ip_tab": 0,
+        "launch_args": json.dumps(launch),
+    })
+    if not data or data.get("code") != 0:
+        raise RuntimeError(f"AdsPower start failed: {data}")
+    info = data.get("data") or {}
+    addr = info.get("debuggerAddress") or (
+        f"127.0.0.1:{info.get('debug_port')}" if info.get("debug_port") else "")
+    if not addr:
+        raise RuntimeError(f"AdsPower returned no debugger address: {data}")
+    return addr, info
+
+
+# ══════════════════════════════════════════════════════════════
 #  Driver creation
 # ══════════════════════════════════════════════════════════════
 
 def _create_driver():
     global driver, profile
+    if ADS_POWER:
+        proxy = os.environ.get("MONETAG_PROXY", "")
+        addr, info = _ads_power_start(proxy)
+        log(f"ads-power profile {ADSPOWER_PROFILE_ID} debugger={addr} proxy={proxy or 'none'}")
+        options = Options()
+        options.add_experimental_option("debuggerAddress", addr)
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.page_load_strategy = "none"
+        chromedriver_paths = [
+            "/usr/bin/chromedriver",
+            "/snap/bin/chromium.chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+            "/usr/local/bin/chromedriver",
+        ]
+        driver = None
+        for cpath in chromedriver_paths:
+            if os.path.exists(cpath) and _check_native_binary(cpath):
+                try:
+                    driver = webdriver.Chrome(service=Service(executable_path=cpath), options=options)
+                    break
+                except Exception:
+                    continue
+        if driver is None:
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver.set_page_load_timeout(30)
+        driver.implicitly_wait(0)
+        try:
+            driver.execute_cdp_cmd("Network.enable", {"maxTotalBufferSize": 1048576})
+        except Exception:
+            pass
+        _inject_traffic_source()
+        return
     kind = _pick_device_kind()
     geo = _lookup_proxy_geo(PROXY_IP)
     profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
@@ -1711,6 +1807,8 @@ def run_view_cycle(cycle_idx):
         report_proxy_failure("smartlink-nav-empty")
         driver.quit()
         driver = None
+        if ADS_POWER:
+            _ads_power_stop()
         return None, 2
 
     # Follow the redirect chain
@@ -1778,6 +1876,8 @@ def run_view_cycle(cycle_idx):
     except Exception:
         pass
     driver = None
+    if ADS_POWER:
+        _ads_power_stop()
     return record, 0
 
 
@@ -1939,6 +2039,11 @@ if __name__ == "__main__":
         if driver:
             try:
                 driver.quit()
+            except Exception:
+                pass
+        if ADS_POWER:
+            try:
+                _ads_power_stop()
             except Exception:
                 pass
         sys.exit(1)
