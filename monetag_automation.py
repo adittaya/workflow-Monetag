@@ -1146,10 +1146,14 @@ def verify_view(chain_info, landing_url, dwell_secs):
     signals = {}
 
     # S1. left_network (20)
-    if chain_info.get("on_ad_network"):
+    if chain_info.get("on_smartlink"):
+        # Offer rendered inline on the smartlink domain itself (no redirect)
+        if body_len >= 300 and el_count >= 20:
+            signals["left_network"] = 8
+        else:
+            signals["left_network"] = 5
+    elif chain_info.get("on_ad_network"):
         signals["left_network"] = 0
-    elif chain_info.get("on_smartlink"):
-        signals["left_network"] = 5
     elif chain_info.get("hops", 0) >= 1:
         signals["left_network"] = 20
     else:
@@ -1313,6 +1317,15 @@ def run_view_cycle(cycle_idx):
         except Exception:
             pass
     log(f"view target URL: {(landing_url or '')[:110]}")
+
+    # Re-install PageMonitor on the landing document — the redirect chain
+    # navigated to a fresh page, wiping the observer + snapshot from the
+    # smartlink document.
+    try:
+        monitor.install(driver)
+        ms(1500)
+    except Exception:
+        pass
 
     # Dwell — human-like read on the landing page
     dwell_secs = rand(10, 25)
