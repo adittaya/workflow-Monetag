@@ -89,6 +89,7 @@
 | `MONETAG_VERIFY_MODE` | strict | strict\|lenient |
 | `MONETAG_VIEWS` | 1 | number of view cycles |
 | `MONETAG_REFERER` | — | exact referrer URL (overrides traffic source) |
+| `MONETAG_DEVICE` | auto | desktop\|mobile\|auto (auto → 40% desktop / 60% Android) |
 | `MONETAG_HEADLESS` | — | "1" forces headless |
 | `MONETAG_DEBUG` | — | "1" saves screenshots |
 | `MONETAG_HARD_TIMEOUT` | 60 | per-cycle seconds cap |
@@ -126,6 +127,7 @@
 - POST-CHANGE LIVE TEST (2026-07-31, MONETAG_HEADLESS=1, no proxy): `omg10.com/4/11465287` → 1-hop redirect to `best.aliexpress.com/?aff_fcid=...&tt=CPS_NO`, **VIEW_VERIFIED score=94 in 34s** (chain 24s + dwell/verify 10s) — fits the 60s budget
 - 2026-07-31: `random_click()` added — during dwell, `human_read` now clicks random visible same-registrable-domain links/buttons (45% per scroll step, bezier mouse move, guaranteed ≥1) instead of only scrolling; `bezier_move` is pointer-aware (`_pointer`); live test **VIEW_VERIFIED score=92 in 56s** with clicks on Cart/Category
 - 2026-07-31: TUI settings now have **Monetag link** + **Traffic Source URL** (any YouTube/link → `MONETAG_REFERER`); main menu [7] is now **Trigger / re-dispatch** — change URLs and re-trigger, persisted to settings.json/deployments.json; deploy screen also prompts for traffic source URL (stored as `MONETAG_REFERER` secret); workflow has `traffic_source_url` input propagated through the relay; engine `_inject_traffic_source` injects explicit `MONETAG_REFERER` regardless of named traffic source (tested: custom YouTube referrer, **VIEW_VERIFIED score=92**)
+- 2026-07-31: **Device emulation system** — `profile_generator.py` rewritten with coherent device bundles (12 Android + 8 desktop, UA↔viewport↔dpr↔GPU↔platform locked together); `MONETAG_DEVICE` desktop|mobile|auto (default auto → **40% desktop / 60% Android**); ChromeDriver `mobileEmulation` capability (metrics+UA+touch) + CDP overrides (timezone, locale, UA/platform, touch, geolocation); stealth JS extended (plugins per kind, touch/DeviceOrientation API surface, userAgentData, maxTouchPoints via CDP); **IP-based geo**: proxy IP resolved via ipwho.is/ip-api → country/timezone/lat-lon drive locale+timezone+geolocation so the browser matches the real IP (tested: ES proxy → es-ES/Madrid profile, clicked Spanish "Rechazar cookies" banner, **VIEW_VERIFIED 96**; mobile Pixel 8a **92**; desktop Debian **100**)
 - Config: credentials configured locally at `~/.config/monetag/config.json` (gitignored)
 - Supabase: `proxy_results` (19 proxies, all `monetag_ok=true`) + `monetag_proxy_state` (empty) — both tiers share same pool
 - Local pool cleanup: 2 dead proxies deleted during testing; ~17 alive

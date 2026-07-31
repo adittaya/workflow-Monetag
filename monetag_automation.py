@@ -16,7 +16,8 @@ Usage:
 
 Env vars (CI / headless):
     MONETAG_SMARTLINK_URL   SmartLink URL to visit (required if no argv)
-    MONETAG_PROXY           http://ip:port proxy for this session
+    MONETAG_DEVICE         desktop|mobile|auto (default: auto → 40% desktop / 60% Android)
+    MONETAG_PROXY           http://ip:port proxy for this session (IP geolocation drives locale/timezone)
     MONETAG_TRAFFIC_SOURCE  referrer/UTM profile (default: youtube)
     MONETAG_VERIFY_MODE     strict|lenient (default: strict)
     MONETAG_VIEWS           number of view cycles to run (default: 1)
@@ -773,15 +774,19 @@ def _build_stealth_js(p):
     (function() {{
         var p = {json.dumps(p)};
         Object.defineProperty(navigator, 'webdriver', {{get: function() {{ return undefined; }} }});
+        Object.defineProperty(navigator, 'vendor', {{get: function() {{ return 'Google Inc.'; }} }});
 
         Object.defineProperty(navigator, 'plugins', {{
             get: function() {{
-                var plugins = [
-                    {{name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'}},
-                    {{name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''}},
-                    {{name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}}
-                ];
-                plugins.length = 3;
+                var plugins = [];
+                if (!p.touch) {{
+                    plugins = [
+                        {{name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'}},
+                        {{name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''}},
+                        {{name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}}
+                    ];
+                }}
+                plugins.length = p.touch ? 0 : 3;
                 plugins.refresh = function() {{}};
                 return plugins;
             }}
@@ -791,6 +796,8 @@ def _build_stealth_js(p):
         Object.defineProperty(navigator, 'hardwareConcurrency', {{get: function() {{ return p.hardwareConcurrency; }} }});
         Object.defineProperty(navigator, 'deviceMemory', {{get: function() {{ return p.deviceMemory; }} }});
         Object.defineProperty(navigator, 'platform', {{get: function() {{ return p.platform; }} }});
+        // maxTouchPoints is non-configurable once touch emulation is active —
+        // CDP already sets it to match p.maxTouchPoints, so leave it alone.
 
         window.chrome = {{ runtime: {{}}, loadTimes: function() {{}}, csi: function() {{}} }};
 
@@ -852,8 +859,8 @@ def _build_stealth_js(p):
         Object.defineProperty(screen, 'height', {{get: function() {{ return p.screen.height; }} }});
         Object.defineProperty(screen, 'availWidth', {{get: function() {{ return p.screen.availWidth; }} }});
         Object.defineProperty(screen, 'availHeight', {{get: function() {{ return p.screen.availHeight; }} }});
-        Object.defineProperty(screen, 'colorDepth', {{get: function() {{ return p.screen.colorDepth; }} }});
-        Object.defineProperty(screen, 'pixelDepth', {{get: function() {{ return p.screen.colorDepth; }} }});
+        Object.defineProperty(screen, 'colorDepth', {{get: function() {{ return p.colorDepth; }} }});
+        Object.defineProperty(screen, 'pixelDepth', {{get: function() {{ return p.colorDepth; }} }});
 
         if (window.outerWidth === 0) {{
             Object.defineProperty(window, 'outerWidth', {{get: function() {{ return p.screen.availWidth; }} }});
@@ -865,8 +872,33 @@ def _build_stealth_js(p):
         }}
 
         Object.defineProperty(navigator, 'maxTouchPoints', {{
-            get: function() {{ return p.platform.includes('Mac') ? 0 : Math.round(Math.random()); }}
+            get: function() {{ return p.maxTouchPoints; }}
         }});
+
+        // Touch / mobile-device API surface must exist only on emulated mobiles
+        if (p.touch) {{
+            try {{
+                Object.defineProperty(window, 'ontouchstart', {{get: function() {{ return null; }} }});
+                Object.defineProperty(window, 'ontouchend', {{get: function() {{ return null; }} }});
+                Object.defineProperty(window, 'orientation', {{get: function() {{ return 0; }} }});
+                if (!('DeviceOrientationEvent' in window)) window.DeviceOrientationEvent = function() {{}};
+                if (!('DeviceMotionEvent' in window)) window.DeviceMotionEvent = function() {{}};
+                Object.defineProperty(Navigator.prototype, 'userAgentData', {{
+                    get: function() {{
+                        var brands = p.userAgent.indexOf('Edg/') >= 0
+                            ? [{{brand: 'Microsoft Edge', version: '151'}}, {{brand: 'Chromium', version: '151'}}]
+                            : [{{brand: 'Google Chrome', version: '151'}}, {{brand: 'Chromium', version: '151'}}];
+                        return {{
+                            brands: brands,
+                            mobile: true,
+                            platform: 'Android',
+                            getHighEntropyValues: function() {{ return Promise.resolve({{}}); }},
+                            toJSON: function() {{ return {{ brands: brands, mobile: true, platform: 'Android' }}; }}
+                        }};
+                    }}
+                }});
+            }} catch (e) {{}}
+        }}
 
         if (navigator.getBattery) {{
             navigator.getBattery = function() {{
@@ -882,14 +914,78 @@ def _build_stealth_js(p):
 
 
 # ══════════════════════════════════════════════════════════════
+#  Device selection & IP-based geolocation
+# ══════════════════════════════════════════════════════════════
+
+def _pick_device_kind():
+    """Return 'desktop'|'mobile'|None. MONETAG_DEVICE forces it; default None
+    lets generate_profile roll the 40% desktop / 60% Android split."""
+    env = os.environ.get("MONETAG_DEVICE", "").strip().lower()
+    if env in ("desktop", "mobile", "android"):
+        return "desktop" if env == "desktop" else "mobile"
+    legacy = os.environ.get("MONETAG_MOBILE", "")
+    if legacy:
+        return "desktop" if legacy == "0" else "mobile"
+    return None
+
+
+def _lookup_proxy_geo(ip):
+    """Resolve a proxy IP to country/timezone/coords via a free geo API."""
+    if not ip or ip in ("127.0.0.1", "localhost", "::1"):
+        return None
+    import urllib.request
+    import urllib.parse
+    ip = urllib.parse.quote(ip)
+    providers = [
+        ("https://ipwho.is/%s", "whois"),
+        ("http://ip-api.com/json/%s", "ipapi"),
+    ]
+    for tmpl, kind in providers:
+        try:
+            url = tmpl % ip
+            req = urllib.request.Request(url, headers={"User-Agent": "monetag/3.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if not data:
+                continue
+            if kind == "whois":
+                if not data.get("success"):
+                    continue
+                tz = data.get("timezone", {})
+                timezone = tz.get("id", "") if isinstance(tz, dict) else str(tz or "")
+                return {
+                    "country": (data.get("country_code") or "").upper(),
+                    "timezone": timezone or None,
+                    "lat": data.get("latitude"),
+                    "lon": data.get("longitude"),
+                }
+            else:
+                if data.get("status") != "success":
+                    continue
+                return {
+                    "country": (data.get("countryCode") or "").upper(),
+                    "timezone": data.get("timezone") or None,
+                    "lat": data.get("lat"),
+                    "lon": data.get("lon"),
+                }
+        except Exception:
+            continue
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
 #  Driver creation
 # ══════════════════════════════════════════════════════════════
 
 def _create_driver():
     global driver, profile
-    mobile = os.environ.get("MONETAG_MOBILE", "1") != "0"
-    profile = generate_profile(mobile=mobile, youtube=TRAFFIC_SOURCE == "youtube")
-    log(f"profile: {profile['viewport']['width']}x{profile['viewport']['height']} "
+    kind = _pick_device_kind()
+    geo = _lookup_proxy_geo(PROXY_IP)
+    profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
+    if geo:
+        log(f"ip geo: {geo.get('country')} {geo.get('timezone')}")
+    log(f"profile: {profile['deviceKind']} {profile['name']} "
+        f"{profile['viewport']['width']}x{profile['viewport']['height']} "
         f"{profile['locale']} {profile['timezone']} hw={profile['hardwareConcurrency']} "
         f"mem={profile['deviceMemory']} dpr={profile['deviceScaleFactor']}")
 
@@ -904,7 +1000,23 @@ def _create_driver():
     options.add_argument("--use-gl=swiftshader")
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
     vp = profile["viewport"]
-    options.add_argument(f"--window-size={vp['width']},{vp['height']}")
+    is_mobile = profile["deviceKind"] == "mobile"
+
+    if is_mobile:
+        # ChromeDriver native mobile emulation: metrics + UA + touch in one shot
+        options.add_experimental_option("mobileEmulation", {
+            "deviceMetrics": {
+                "width": vp["width"],
+                "height": vp["height"],
+                "pixelRatio": profile["deviceScaleFactor"],
+                "mobile": True,
+                "touch": True,
+            },
+            "userAgent": profile["userAgent"],
+        })
+    else:
+        options.add_argument(f"--window-size={vp['width']},{vp['height']}")
+        options.add_argument(f"--user-agent={profile['userAgent']}")
 
     headless = os.environ.get("MONETAG_HEADLESS") == "1"
     if headless:
@@ -925,7 +1037,6 @@ def _create_driver():
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(f"--user-agent={profile['userAgent']}")
 
     chromedriver_paths = [
         "/usr/bin/chromedriver",
@@ -967,6 +1078,8 @@ def _create_driver():
     except Exception:
         pass
 
+    _apply_cdp_profile(profile)
+
     _inject_traffic_source()
 
     stealth_js = _build_stealth_js(profile)
@@ -975,6 +1088,52 @@ def _create_driver():
     except Exception:
         pass
     driver.execute_script(stealth_js)
+
+
+def _apply_cdp_profile(profile):
+    """Push coherent CDP overrides so the browser matches the emulated device:
+    timezone, locale, UA/platform, touch, metrics and (when the proxy IP gave
+    coordinates) geolocation."""
+    try:
+        driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": profile["timezone"]})
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": profile["locale"]})
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+            "userAgent": profile["userAgent"], "platform": profile["platform"],
+        })
+    except Exception:
+        pass
+
+    if profile["deviceKind"] == "mobile":
+        vp = profile["viewport"]
+        scr = profile["screen"]
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": vp["width"], "height": vp["height"],
+                "deviceScaleFactor": profile["deviceScaleFactor"],
+                "mobile": True, "screenWidth": scr["width"], "screenHeight": scr["height"],
+            })
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+                "enabled": True, "maxTouchPoints": profile["maxTouchPoints"],
+            })
+        except Exception:
+            pass
+
+    if profile.get("geoLat") is not None and profile.get("geoLon") is not None:
+        try:
+            driver.execute_cdp_cmd("Emulation.setGeolocationOverride", {
+                "latitude": profile["geoLat"], "longitude": profile["geoLon"], "accuracy": 50,
+            })
+        except Exception:
+            pass
 
 
 def debug_shot(label):
