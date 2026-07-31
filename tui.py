@@ -97,6 +97,18 @@ def validate_repo_name(name):
     """Validate GitHub repo name (alphanumeric, hyphens, underscores only)."""
     return bool(re.match(r'^[a-zA-Z0-9_-]+$', name))
 
+def normalize_url(val):
+    """Auto-fix minor URL mistakes: strip whitespace, add https:// scheme."""
+    val = (val or "").strip()
+    if not val:
+        return ""
+    if not re.match(r'^https?://', val, re.I):
+        val = "https://" + val
+    return val
+
+def looks_like_url(val):
+    return bool(val and re.match(r'^https?://\S+\.\S+', val, re.I))
+
 # ─── GitHub API ───────────────────────────────────────────────────────────────
 
 def gh(endpoint, token, method="GET", body=None):
@@ -204,6 +216,47 @@ def get_run_logs(token, owner, repo, run_id):
             return logs
     except Exception:
         return {}
+
+# ─── Deployment Config Recovery ───────────────────────────────────────────────
+
+def parse_run_log_config(logs):
+    """Pull a deployment's config from the 'Validate SmartLink URL' log echoes."""
+    cfg = {}
+    text = "\n".join(logs.values())
+    m = re.search(r"SmartLink:\s*(\S+)", text)
+    if m and m.group(1).startswith("http"):
+        cfg["smartlink_url"] = m.group(1)
+    m = re.search(r"Traffic source:\s*(\S+)", text)
+    if m:
+        cfg["traffic_source"] = m.group(1)
+    m = re.search(r"Referrer \(traffic source URL\):\s*(\S+)", text)
+    if m and m.group(1):
+        cfg["traffic_source_url"] = m.group(1)
+    m = re.search(r"Verify mode:\s*(\S+)", text)
+    if m:
+        cfg["verify_mode"] = m.group(1)
+    m = re.search(r"Views:\s*(\S+)", text)
+    if m:
+        cfg["views"] = m.group(1)
+    return cfg
+
+def recover_deployment_config(token, owner, rn):
+    """Recover a deployment's current config (SmartLink/traffic) from GitHub."""
+    cfg = {}
+    runs = get_runs(owner, rn, token, per=3)
+    for run in runs:
+        inputs = run.get("inputs") or {}
+        if inputs.get("smartlink_url"):
+            for k in ("smartlink_url", "traffic_source_url", "traffic_source", "verify_mode", "views"):
+                if inputs.get(k):
+                    cfg[k] = inputs[k]
+            return cfg
+        if run.get("conclusion") in ("success", "failure", "cancelled"):
+            logs = get_run_logs(token, owner, rn, run["id"])
+            cfg = parse_run_log_config(logs)
+            if cfg.get("smartlink_url"):
+                return cfg
+    return cfg
 
 # ─── Secret Encryption ────────────────────────────────────────────────────────
 
@@ -615,6 +668,22 @@ def screen_accounts():
                     warn("Token missing 'repo' scope")
                 if not any("workflow" in s for s in scope_list):
                     warn("Token missing 'workflow' scope")
+                info("Run Doctor [9] to verify the whole setup.")
+                if confirm(f"Import existing monetag deployments from @{username} into the local database now?"):
+                    existing = load_json("deployments.json")
+                    n, u, e, rec = sync_account(name, accounts[name], existing)
+                    save_json("accounts.json", accounts)
+                    save_json("deployments.json", existing)
+                    print()
+                    if n or u:
+                        success(f"Imported {len(n)} new + {len(u)} existing deployments")
+                        if rec:
+                            success(f"Recovered config (SmartLink / traffic) for {rec} deployment(s)")
+                            info("Use Trigger / re-dispatch [4] to change a link or traffic.")
+                    else:
+                        info("No monetag-* repos found for this account")
+                    for err in e:
+                        warn(err)
             else:
                 error("Invalid token")
         elif choice == "2" and accts:
@@ -687,14 +756,18 @@ def screen_deploy():
     full_name = repo_name if repo_name.startswith("monetag-") else f"monetag-{repo_name}"
     settings = load_json("settings.json")
     smartlink_url = prompt("Monetag link (SmartLink URL)", settings.get("smartlink_url", ""))
+    smartlink_url = normalize_url(smartlink_url)
     if not smartlink_url:
         error("SmartLink URL is required")
         input(f"\n  Press Enter to continue...")
         return
+    if not looks_like_url(smartlink_url):
+        warn(f"'{smartlink_url}' does not look like a valid URL")
+        if not confirm("Continue anyway?"):
+            return
     traffic_source_url = prompt("Traffic source URL (YouTube / any link, blank = none)",
                                 settings.get("traffic_source_url", ""))
-    if traffic_source_url and not traffic_source_url.startswith("http"):
-        traffic_source_url = "https://" + traffic_source_url
+    traffic_source_url = normalize_url(traffic_source_url)
 
     if not confirm(f"Deploy {full_name} as @{username}?"):
         return
@@ -917,11 +990,72 @@ def screen_logs():
 
 # ─── Screen: Sync ─────────────────────────────────────────────────────────────
 
+def sync_account(name, acct, existing):
+    """Scan one account's monetag-* repos and merge them into the local database.
+    Returns (new_repos, updated_repos, errors, recovered_count)."""
+    new_repos, updated_repos, errors, recovered = [], [], [], 0
+    tok = acct.get("token", "")
+    if not tok:
+        errors.append(f"@{name}: no token")
+        return new_repos, updated_repos, errors, recovered
+    loading(f"Scanning @{acct.get('username', name)}")
+    try:
+        repos = paginate_repos(tok)
+        if isinstance(repos, dict) and repos.get("_rate_limited"):
+            errors.append(f"@{name}: rate-limited by GitHub API")
+            return new_repos, updated_repos, errors, recovered
+        monetag = [r for r in repos if r["name"].startswith("monetag-")]
+        owner = monetag[0]["owner"]["login"] if monetag else acct.get("username", name)
+        acct["username"] = owner
+        for repo in monetag:
+            rn = repo["name"]
+            status = "unknown"
+            dest = ""
+            cfg = {}
+            try:
+                runs = get_runs(owner, rn, tok, per=3)
+                last = runs[0] if runs else None
+                status = (last.get("conclusion") or last.get("status", "unknown")) if last else "no_runs"
+                if last and last.get("conclusion") == "success":
+                    dest = extract_destination(tok, owner, rn, last["id"])
+                cfg = recover_deployment_config(tok, owner, rn)
+                if cfg:
+                    recovered += 1
+            except Exception as e:
+                status = "unknown"
+                errors.append(f"{rn}: {str(e)[:40]}")
+
+            if rn in existing:
+                existing[rn]["status"] = status
+                existing[rn]["account"] = name
+                if dest:
+                    existing[rn]["destination"] = dest
+                for k, v in cfg.items():
+                    if v:
+                        existing[rn][k] = v
+                updated_repos.append(rn)
+            else:
+                rec = {
+                    "name": rn, "account": name,
+                    "repo_url": repo["html_url"], "status": status,
+                    "destination": dest,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+                rec.update({k: v for k, v in cfg.items() if v})
+                existing[rn] = rec
+                new_repos.append(rn)
+    except Exception as e:
+        errors.append(f"@{name}: {str(e)[:40]}")
+    return new_repos, updated_repos, errors, recovered
+
 def screen_sync():
     clear()
     banner()
     print(f"\n  {C_BOLDWHITE}SYNC FROM GITHUB{C_RESET}")
     divider()
+    info("Imports existing monetag-* deployments into the local database.")
+    info("Recovers each deployment's SmartLink + traffic config from run logs,")
+    info("so you can re-dispatch them from a new device.")
 
     accounts = load_json("accounts.json")
     if not accounts:
@@ -933,60 +1067,21 @@ def screen_sync():
     new_repos = []
     updated_repos = []
     errors = []
+    recovered_total = 0
 
     for name, acct in accounts.items():
-        tok = acct.get("token", "")
-        if not tok:
-            errors.append(f"@{name}: no token")
-            continue
-        loading(f"Scanning @{acct.get('username', name)}")
-        try:
-            repos = paginate_repos(tok)
-            if isinstance(repos, dict) and repos.get("_rate_limited"):
-                errors.append(f"@{name}: rate-limited by GitHub API")
-                continue
-            monetag = [r for r in repos if r["name"].startswith("monetag-")]
-            owner = monetag[0]["owner"]["login"] if monetag else acct.get("username", name)
-            acct["username"] = owner
-            for repo in monetag:
-                rn = repo["name"]
-                status = "unknown"
-                dest = ""
-                try:
-                    runs = get_runs(owner, rn, tok, per=1)
-                    last = runs[0] if runs else None
-                    status = (last.get("conclusion") or last.get("status", "unknown")) if last else "no_runs"
-
-                    dest = ""
-                    if last and last.get("conclusion") == "success":
-                        dest = extract_destination(tok, owner, rn, last["id"])
-                except Exception as e:
-                    status = "unknown"
-                    errors.append(f"{rn}: {str(e)[:40]}")
-
-                if rn in existing:
-                    existing[rn]["status"] = status
-                    existing[rn]["account"] = name
-                    if dest:
-                        existing[rn]["destination"] = dest
-                    updated_repos.append(rn)
-                else:
-                    existing[rn] = {
-                        "name": rn, "account": name,
-                        "repo_url": repo["html_url"], "status": status,
-                        "destination": dest,
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    }
-                    new_repos.append(rn)
-        except Exception as e:
-            errors.append(f"@{name}: {str(e)[:40]}")
+        n, u, e, rec = sync_account(name, acct, existing)
+        new_repos += n
+        updated_repos += u
+        errors += e
+        recovered_total += rec
 
     save_json("accounts.json", accounts)
     save_json("deployments.json", existing)
 
     print()
     if new_repos or updated_repos:
-        success(f"Sync complete")
+        success("Sync complete")
     else:
         info("Nothing new found")
     print(f"  {C_DIM}New:{C_RESET} {len(new_repos)}  "
@@ -994,6 +1089,9 @@ def screen_sync():
           f"{C_DIM}Total:{C_RESET} {len(existing)}")
     if new_repos:
         print(f"  {C_GREEN}New repos:{C_RESET} {', '.join(new_repos)}")
+    if recovered_total:
+        success(f"Recovered config (SmartLink / traffic) for {recovered_total} deployment(s)")
+        info("Use Trigger / re-dispatch [4] to pick a deployment and change the link or traffic.")
     if errors:
         for e in errors:
             warn(e)
@@ -1041,18 +1139,49 @@ def screen_dispatch():
     deps = load_json("deployments.json")
     dep = deps.get(rn, {})
 
-    def_or_sl = settings.get("smartlink_url") or dep.get("smartlink_url") or ""
-    def_or_ts = settings.get("traffic_source_url") or dep.get("traffic_source_url") or ""
+    info(f"Deployment: {rn} (@{owner})")
+    if dep.get("smartlink_url"):
+        info(f"Current link: {dep['smartlink_url']}")
+    if dep.get("traffic_source_url"):
+        info(f"Current referrer: {dep['traffic_source_url']}")
+    if dep.get("traffic_source"):
+        info(f"Current source: {dep['traffic_source']}")
+    if not dep.get("smartlink_url"):
+        loading(f"Recovering config for {rn} from GitHub")
+        cfg = recover_deployment_config(token, owner, rn)
+        if cfg.get("smartlink_url"):
+            dep.update({k: v for k, v in cfg.items() if v})
+            deps[rn] = dep
+            save_json("deployments.json", deps)
+            success("Recovered deployment config (SmartLink / traffic) from GitHub")
+        else:
+            info("No previous run found — defaults come from Settings [8]")
+    print()
+
+    def_or_sl = dep.get("smartlink_url") or settings.get("smartlink_url") or ""
+    def_or_ts = dep.get("traffic_source_url") or settings.get("traffic_source_url") or ""
     def_or_src = dep.get("traffic_source") or settings.get("traffic_source") or "youtube"
 
     smartlink_url = prompt("Monetag link (SmartLink URL)", def_or_sl)
     traffic_source_url = prompt("Traffic source URL (YouTube / any link, blank = none)", def_or_ts)
     traffic_source = prompt("Traffic source (youtube|google|facebook|twitter|direct)", def_or_src)
 
-    if smartlink_url and not smartlink_url.startswith("http"):
-        smartlink_url = "https://" + smartlink_url
-    if traffic_source_url and not traffic_source_url.startswith("http"):
-        traffic_source_url = "https://" + traffic_source_url
+    smartlink_url = normalize_url(smartlink_url)
+    traffic_source_url = normalize_url(traffic_source_url)
+
+    valid_sources = ("youtube", "google", "facebook", "twitter", "direct")
+    if traffic_source and traffic_source not in valid_sources:
+        warn(f"'{traffic_source}' is not a valid traffic source — using 'youtube' instead")
+        traffic_source = "youtube"
+
+    if smartlink_url and not looks_like_url(smartlink_url):
+        warn(f"'{smartlink_url}' does not look like a valid URL")
+        if not confirm("Continue anyway?"):
+            return
+    if not smartlink_url:
+        warn("No SmartLink URL set — the workflow may not produce views")
+        if not confirm("Continue without a SmartLink URL?"):
+            return
 
     inputs = {}
     if smartlink_url:
@@ -1130,6 +1259,7 @@ def screen_settings():
             return
         elif choice == "1":
             val = prompt("Supabase URL", settings.get("supabase_url"))
+            val = normalize_url(val)
             settings["supabase_url"] = val
             save_json("settings.json", settings)
             success("Saved")
@@ -1145,11 +1275,17 @@ def screen_settings():
             success("Saved")
         elif choice == "4":
             val = prompt("Monetag link (SmartLink URL)", settings.get("smartlink_url"))
+            val = normalize_url(val)
+            if val and not looks_like_url(val):
+                warn(f"'{val}' does not look like a valid URL — saved anyway")
             settings["smartlink_url"] = val
             save_json("settings.json", settings)
             success("Saved")
         elif choice == "5":
             val = prompt("Traffic source URL (YouTube video / any link)", settings.get("traffic_source_url"))
+            val = normalize_url(val)
+            if val and not looks_like_url(val):
+                warn(f"'{val}' does not look like a valid URL — saved anyway")
             settings["traffic_source_url"] = val
             save_json("settings.json", settings)
             success("Saved")
@@ -1157,6 +1293,346 @@ def screen_settings():
             if confirm("Clear all settings?"):
                 save_json("settings.json", {})
                 success("Settings cleared")
+
+# ─── Doctor / Diagnostics ─────────────────────────────────────────────────────
+
+def _check_import(name):
+    try:
+        __import__(name)
+        return True
+    except ImportError:
+        return False
+
+def _which(bin_name):
+    return shutil.which(bin_name)
+
+def _try_pip_install(pkg):
+    loading(f"Installing {pkg} (pip)")
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--user", pkg],
+            capture_output=True, timeout=180,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def _try_apt_install(pkg):
+    loading(f"Installing {pkg} (apt, needs sudo)")
+    try:
+        r = subprocess.run(
+            ["sudo", "apt-get", "install", "-y", pkg],
+            capture_output=True, timeout=300,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def _doc(status, label, detail=""):
+    if status == "ok":
+        icon, color = f"{C_GREEN}✓{C_RESET}", C_GREEN
+    elif status == "warn":
+        icon, color = f"{C_YELLOW}⚠{C_RESET}", C_YELLOW
+    elif status == "error":
+        icon, color = f"{C_RED}✗{C_RESET}", C_RED
+    else:
+        icon, color = f"{C_BLUE}ℹ{C_RESET}", C_BLUE
+    line = f"  {icon} {C_BOLD}{label}{C_RESET}"
+    if detail:
+        line += f"  {C_DIM}{detail}{C_RESET}"
+    print(line)
+    return status
+
+def _test_supabase(su, sk):
+    """Return (ok:bool, detail:str) for Supabase REST connectivity."""
+    if not su or not sk:
+        return None, "credentials missing"
+    try:
+        req = urllib.request.Request(
+            f"{su.rstrip('/')}/rest/v1/proxy_results?select=count",
+            headers={
+                "apikey": sk,
+                "Authorization": f"Bearer {sk}",
+                "Accept": "application/vnd.pgrst.object+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read().decode()
+            return True, f"reachable — proxy_results count {data}"
+    except Exception as e:
+        return False, f"connection failed ({str(e)[:60]})"
+
+def _doc_check_scopes(scopes):
+    missing = []
+    if not any("repo" in s for s in scopes):
+        missing.append("repo")
+    if not any("workflow" in s for s in scopes):
+        missing.append("workflow")
+    return missing
+
+def _classify_failure(token, owner, rn, run):
+    """Inspect a failed run's logs and return (status, guidance)."""
+    try:
+        logs = get_run_logs(token, owner, rn, run["id"])
+        text = "\n".join(logs.values())
+    except Exception:
+        return "warn", "Could not read logs — check manually in View Logs [6]."
+
+    verdicts = re.findall(r"(VIEW_(?:VERIFIED|LIKELY|WEAK|BLOCKED|INVALID))", text)
+    if any(v in ("VIEW_BLOCKED", "VIEW_INVALID") for v in verdicts):
+        return ("warn",
+                "views were blocked/invalid — SmartLink likely served a Cloudflare challenge "
+                "or the traffic looks bot-like. Try a traffic source URL / fresh proxy pool.")
+    if "VIEW_WEAK" in verdicts:
+        return ("warn",
+                "views scored WEAK — set a traffic source URL (referrer) in Settings [8] to "
+                "boost the verification score.")
+    if re.search(r"ModuleNotFoundError|ImportError:|pip install", text):
+        return ("error", "workflow runner is missing a dependency — update the template repo.")
+    if re.search(r"Secret|MONETAG_SMARTLINK_URL|SUPABASE_URL|not set", text):
+        return ("warn", "workflow is missing secrets — re-deploy or re-set secrets.")
+    if re.search(r"exit.?code:?\s+2\b", text, re.I):
+        return ("warn", "run exited 2 (blocked/invalid views) — see verdict lines in logs.")
+    if re.search(r"rate.?limit|403\b|Unauthorized", text, re.I):
+        return ("warn", "GitHub rate limit or auth problem — check the token in Accounts [1].")
+    return ("info", "check the full log tail in View Logs [6].")
+
+def screen_doctor():
+    clear()
+    banner()
+    print(f"\n  {C_BOLDWHITE}DOCTOR — DIAGNOSE & AUTO-FIX{C_RESET}")
+    divider()
+    print(f"  {C_DIM}Checks your whole setup, flags problems, and auto-fixes minor mistakes.{C_RESET}")
+
+    settings = load_json("settings.json")
+    deps = load_json("deployments.json")
+    accounts = load_json("accounts.json")
+    fixes_applied = []
+    n_ok = n_warn = n_err = 0
+
+    # ── 1. Local environment ────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}1) LOCAL ENVIRONMENT{C_RESET}")
+    divider()
+
+    py_ok = sys.version_info >= (3, 8)
+    if py_ok:
+        n_ok += 1
+        _doc("ok", "Python 3.8+", f"Python {sys.version.split()[0]}")
+    else:
+        n_err += 1
+        _doc("error", "Python 3.8+", "too old — upgrade Python")
+
+    if _check_import("selenium"):
+        n_ok += 1
+        _doc("ok", "selenium", "python library present")
+    else:
+        n_warn += 1
+        _doc("warn", "selenium", "python library missing")
+        if confirm("Install 'selenium' now? (auto-fix)"):
+            fixes_applied.append("selenium install" if _try_pip_install("selenium") else "selenium (failed)")
+            _doc("ok" if _check_import("selenium") else "error", "selenium",
+                 "installed" if _check_import("selenium") else "install failed")
+
+    crypto_ok = HAS_CRYPTO or HAS_NACL
+    if crypto_ok:
+        n_ok += 1
+        _doc("ok", "crypto libs", "cryptography/pynacl present")
+    else:
+        n_warn += 1
+        _doc("warn", "crypto libs", "needed to encrypt GitHub secrets")
+        if confirm("Install 'cryptography pynacl' now? (auto-fix)"):
+            if _try_pip_install("cryptography pynacl"):
+                fixes_applied.append("crypto libs")
+                _doc("ok", "crypto libs", "installed")
+            else:
+                _doc("error", "crypto libs", "install failed")
+
+    chrome = _which("chromium") or _which("google-chrome") or _which("chromium-browser")
+    if chrome:
+        n_ok += 1
+        _doc("ok", "Chrome/Chromium", chrome)
+    else:
+        n_warn += 1
+        _doc("warn", "Chrome/Chromium", "no browser found (needed for local runs)")
+        if confirm("Install 'chromium' via apt? (auto-fix)"):
+            if _try_apt_install("chromium"):
+                fixes_applied.append("chromium")
+                _doc("ok", "Chrome/Chromium", "installed")
+            else:
+                _doc("error", "Chrome/Chromium", "install failed")
+
+    cdr = _which("chromedriver") or _which("chromium-driver")
+    if cdr:
+        n_ok += 1
+        _doc("ok", "ChromeDriver", cdr)
+    else:
+        n_warn += 1
+        _doc("warn", "ChromeDriver", "no chromedriver found (needed for local runs)")
+        if confirm("Install 'chromedriver' via apt? (auto-fix)"):
+            if _try_apt_install("chromedriver"):
+                fixes_applied.append("chromedriver")
+                _doc("ok", "ChromeDriver", "installed")
+            else:
+                _doc("error", "ChromeDriver", "install failed")
+
+    # ── 2. Accounts & token ─────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}2) GITHUB ACCOUNT{C_RESET}")
+    divider()
+    if not accounts:
+        n_err += 1
+        _doc("error", "No accounts", "add one in Accounts [1] first")
+    else:
+        token, acct_name = get_active_token()
+        if not token:
+            n_err += 1
+            _doc("error", "No active account", "activate one in Accounts [1]")
+        else:
+            user_data = gh_user(token)
+            if isinstance(user_data, dict) and user_data.get("login"):
+                n_ok += 1
+                _doc("ok", f"Token valid (@{user_data['login']})",
+                     f"scopes: {user_data.get('_scopes', '') or 'none'}")
+                scopes = [s.strip() for s in user_data.get("_scopes", "").split(",") if s.strip()]
+                missing = _doc_check_scopes(scopes)
+                if missing:
+                    n_warn += 1
+                    _doc("warn", "Token scopes",
+                         f"missing {', '.join(missing)} — regenerate the token with those scopes checked")
+            else:
+                n_err += 1
+                _doc("error", "Token invalid/expired",
+                     f"{user_data.get('message', '')} — fix in Accounts [1]")
+
+    # ── 3. Supabase ─────────────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}3) SUPABASE PROXY POOL{C_RESET}")
+    divider()
+    su, sk, ss = get_supabase_creds(settings)
+    if not su or not sk:
+        n_err += 1
+        _doc("error", "Credentials missing", "needed for the proxy pool")
+        if confirm("Fill them in now? (auto-fix)"):
+            settings["supabase_url"] = prompt("Supabase URL", su)
+            settings["supabase_key"] = prompt("Supabase Key", sk)
+            settings["supabase_secret"] = prompt("Supabase Secret", ss)
+            save_json("settings.json", settings)
+            fixes_applied.append("Supabase credentials")
+            su, sk, ss = get_supabase_creds(settings)
+            n_err -= 1
+    if su and sk:
+        ok, detail = _test_supabase(su, sk)
+        if ok:
+            n_ok += 1
+            _doc("ok", "Supabase", detail)
+        else:
+            n_warn += 1
+            _doc("warn", "Supabase", detail)
+
+    # ── 4. Monetag SmartLink ────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}4) MONETAG SMARTLINK{C_RESET}")
+    divider()
+    sl = settings.get("smartlink_url") or ""
+    if not sl:
+        for d in deps.values():
+            if d.get("smartlink_url"):
+                sl = d["smartlink_url"]
+                break
+    if not sl:
+        n_err += 1
+        _doc("error", "No Monetag link", "SmartLink URL is required to run views")
+        if confirm("Set it now? (auto-fix)"):
+            val = prompt("Monetag link (SmartLink URL)")
+            if val:
+                settings["smartlink_url"] = normalize_url(val)
+                save_json("settings.json", settings)
+                fixes_applied.append("Monetag link")
+                sl = settings["smartlink_url"]
+                n_err -= 1
+    if sl:
+        fixed = normalize_url(sl)
+        if fixed != sl:
+            settings["smartlink_url"] = fixed
+            save_json("settings.json", settings)
+            fixes_applied.append("SmartLink URL scheme (added https://)")
+        if looks_like_url(fixed):
+            n_ok += 1
+            _doc("ok", "Monetag link", fixed)
+        else:
+            n_warn += 1
+            _doc("warn", "Monetag link", f"'{fixed}' does not look like a valid URL")
+
+    # ── 5. Traffic source ───────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}5) TRAFFIC SOURCE{C_RESET}")
+    divider()
+    ts = settings.get("traffic_source_url", "")
+    if ts:
+        fixed = normalize_url(ts)
+        if fixed != ts:
+            settings["traffic_source_url"] = fixed
+            save_json("settings.json", settings)
+            fixes_applied.append("Traffic source URL scheme (added https://)")
+        n_ok += 1
+        _doc("ok", "Traffic source URL", fixed)
+    else:
+        n_ok += 1
+        _doc("ok", "Traffic source", "default (youtube); optional custom referrer boosts score")
+
+    # ── 6. Deployments ──────────────────────────────────────────────────────
+    print(f"\n  {C_BOLD}6) DEPLOYMENTS{C_RESET}")
+    divider()
+    if not deps:
+        n_ok += 1
+        _doc("info", "No deployments yet", "deploy one from Deploy [2]")
+    else:
+        token, _ = get_active_token()
+        for name, dep in deps.items():
+            acct_name = dep.get("account", "")
+            acct = accounts.get(acct_name, {})
+            tok = token or acct.get("token", "")
+            owner = acct.get("username", acct_name)
+            if not tok or not owner:
+                n_warn += 1
+                _doc("warn", name, "no token for this deployment's account")
+                continue
+            runs = get_runs(owner, name, tok, per=1)
+            if not runs:
+                n_warn += 1
+                _doc("warn", name, "no workflow runs yet — wait a minute after dispatch")
+                continue
+            run = runs[0]
+            conclusion = run.get("conclusion") or run.get("status", "unknown")
+            if conclusion == "success":
+                n_ok += 1
+                _doc("ok", name, f"latest run #{run['number']} succeeded")
+            elif conclusion in ("failure", "timed_out", "cancelled"):
+                n_warn += 1
+                st, guide = _classify_failure(tok, owner, name, run)
+                _doc(st, name, f"latest run #{run['number']} {conclusion}")
+                print(f"        {C_DIM}→ {guide}{C_RESET}")
+            else:
+                n_warn += 1
+                _doc("warn", name, f"latest run #{run['number']} {conclusion}")
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    print()
+    divider()
+    summary = f"  {C_GREEN}{n_ok} OK{C_RESET}"
+    if n_warn:
+        summary += f"   {C_YELLOW}{n_warn} WARNING{'' if n_warn == 1 else 'S'}{C_RESET}"
+    else:
+        summary += f"   {C_DIM}0 warnings{C_RESET}"
+    if n_err:
+        summary += f"   {C_RED}{n_err} ERROR{'' if n_err == 1 else 'S'}{C_RESET}"
+    else:
+        summary += f"   {C_DIM}0 errors{C_RESET}"
+    print(summary)
+    if fixes_applied:
+        print(f"  {C_GREEN}Auto-fixed:{C_RESET} {', '.join(fixes_applied)}")
+    if n_ok and not n_warn and not n_err:
+        print(f"  {C_GREEN}All systems go. Nothing to fix.{C_RESET}")
+    elif n_err:
+        print(f"  {C_DIM}Resolve the errors first, then re-run the doctor.{C_RESET}")
+    print()
+    input(f"  Press Enter to continue...")
 
 # ─── Main Menu ────────────────────────────────────────────────────────────────
 
@@ -1166,14 +1642,18 @@ def main_menu():
         banner()
         status_line()
         print()
+        print(f"\n  {C_BOLDWHITE}── MANAGE ──────────────────────{C_RESET}")
         print(f"  {C_BOLD}[1]{C_RESET} Accounts")
         print(f"  {C_BOLD}[2]{C_RESET} Deploy new instance")
         print(f"  {C_BOLD}[3]{C_RESET} Remove deployment")
-        print(f"  {C_BOLD}[4]{C_RESET} Sync from GitHub")
+        print(f"\n  {C_BOLDWHITE}── RUN & MONITOR ────────────────{C_RESET}")
+        print(f"  {C_BOLD}[4]{C_RESET} Trigger / re-dispatch workflow (change URLs)")
         print(f"  {C_BOLD}[5]{C_RESET} View status")
         print(f"  {C_BOLD}[6]{C_RESET} View logs")
-        print(f"  {C_BOLD}[7]{C_RESET} Trigger / re-dispatch workflow (change URLs)")
-        print(f"  {C_BOLD}[8]{C_RESET} Settings")
+        print(f"  {C_BOLD}[7]{C_RESET} Sync from GitHub")
+        print(f"\n  {C_BOLDWHITE}── CONFIGURE & HEALTH ───────────{C_RESET}")
+        print(f"  {C_BOLD}[8]{C_RESET} Settings (URLs, credentials)")
+        print(f"  {C_BOLD}[9]{C_RESET} Doctor — diagnose & auto-fix")
         print(f"  {C_BOLD}[0]{C_RESET} Quit\n")
 
         choice = prompt("Choice")
@@ -1187,15 +1667,17 @@ def main_menu():
         elif choice == "3":
             screen_remove()
         elif choice == "4":
-            screen_sync()
+            screen_dispatch()
         elif choice == "5":
             screen_status()
         elif choice == "6":
             screen_logs()
         elif choice == "7":
-            screen_dispatch()
+            screen_sync()
         elif choice == "8":
             screen_settings()
+        elif choice == "9":
+            screen_doctor()
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 

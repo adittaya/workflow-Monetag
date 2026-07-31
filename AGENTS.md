@@ -114,7 +114,15 @@
 - [x] Create MONETAG.md comprehensive analysis
 - [x] Replace/remove stale AUTOMATION.md + AUTOMATION_GUIDE.md
 - [x] Final syntax check all Python files
-- [ ] git init + initial commit + push to `adittaya/workflow-monetag`
+- [ ] git init + initial commit + push to `adittaya/workflow-monetag` (NOTE: main branch already pushed with commits)
+
+### TUI Reorganization + Doctor (2026-07-31)
+- [x] Main menu grouped: MANAGE [1-3] / RUN & MONITOR [4-7] / CONFIGURE & HEALTH [8-9]
+- [x] `screen_doctor()` — 6-section diagnosis (local env, GitHub token+scopes, Supabase connectivity+proxy count, SmartLink link, traffic source, deployment health) with OK/WARN/ERROR summary
+- [x] Auto-fix: `normalize_url()` adds missing https:// scheme (settings/dispatch/deploy/doctor); invalid traffic source auto-corrected to `youtube`; missing SmartLink/Supabase/cred written via prompt; missing selenium/crypto/chromium/chromedriver offered via pip/apt install
+- [x] `_classify_failure()` — reads failed run logs and gives actionable guidance (VIEW_BLOCKED→CF challenge, missing secrets, rate limit, dep missing)
+- [x] **New-device recovery**: `sync_account()` refactor + `recover_deployment_config()` parses the workflow's "Validate SmartLink URL" log echoes (SmartLink/traffic source/referrer/verify mode/views) from recent runs → restores each deployment's config into local DB; login flow offers to import existing monetag-* repos immediately; dispatch auto-recovers a deployment's config if the local DB is empty and shows current link/referrer/source (dep config takes precedence over global settings defaults)
+- [ ] Commit + push TUI doctor + recovery work
 
 ---
 
@@ -131,5 +139,6 @@
 - Config: credentials configured locally at `~/.config/monetag/config.json` (gitignored)
 - Supabase: `proxy_results` (19 proxies, all `monetag_ok=true`) + `monetag_proxy_state` (empty) — both tiers share same pool
 - Local pool cleanup: 2 dead proxies deleted during testing; ~17 alive
+- 2026-07-31: **TUI reorganized** — main menu grouped MANAGE [1-3] / RUN & MONITOR [4-7] / CONFIGURE & HEALTH [8-9]; new **Doctor [9]** (`screen_doctor`) runs 6 diagnostics (local deps, GitHub token+scopes, Supabase REST connectivity + proxy count, Monetag link, traffic source, deployment health) with OK/WARN/ERROR summary; **auto-fix** system: `normalize_url()` adds https:// scheme everywhere, invalid traffic source auto-corrects to `youtube`, missing SmartLink/Supabase creds written via prompt, missing selenium/crypto/chromium/chromedriver offered via pip/apt; `_classify_failure()` reads failed-run logs and returns actionable guidance (VIEW_BLOCKED→CF challenge, missing secrets, rate limit, missing deps)
 - Fixes shipped: PageMonitor re-install on landing document; `left_network` partial credit for inline smartlink offers; `omg10.com` added to SMARTLINK/AD_NETWORK domains; tier fields ignored (OR query)
 - `proxy_rotator.py --test ip:port` validates via SmartLink redirect when `MONETAG_SMARTLINK_URL` is set, else plain monetag.com reachability
