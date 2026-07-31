@@ -1,0 +1,68 @@
+{
+  "platform": "Monetag",
+  "smartlink_url": "https://omg10.com/4/11465287",
+  "views_requested": 1,
+  "views_completed": 1,
+  "verify_mode": "lenient",
+  "traffic_source": "youtube",
+  "summary": {
+    "VIEW_LIKELY": 1,
+    "total": 1,
+    "verified_or_likely": 1,
+    "landing_types": {
+      "offer_page": 1
+    },
+    "unique_final_domains": [
+      "omg10.com"
+    ]
+  },
+  "views": [
+    {
+      "smartlink_url": "https://omg10.com/4/11465287",
+      "final_url": "https://omg10.com/4/11465287?utm_source=youtube&utm_medium=referral&utm_campaign=smartlink",
+      "landing_type": "offer_page",
+      "chain_hops": [
+        "https://omg10.com/4/11465287?utm_source=youtube&utm_medium=referral&utm_campaign=smartlink"
+      ],
+      "hops": 1,
+      "cloudflare_seen": false,
+      "signals": {
+        "left_network": 8,
+        "page_rendered": 16,
+        "js_healthy": 10,
+        "not_blocked": 15,
+        "offer_signals": 7,
+        "network_evidence": 0,
+        "dwell_time": 10
+      },
+      "page_stats": {
+        "readyState": "complete",
+        "body_len": 1440,
+        "height": 852,
+        "elements": 34,
+        "links": 0,
+        "images": 2,
+        "forms": 0,
+        "buttons": 0,
+        "resources": 0,
+        "js_working": true
+      },
+      "block_signatures": [],
+      "score": 66,
+      "verdict": "VIEW_LIKELY",
+      "verify_mode": "lenient",
+      "dwell_secs": 24,
+      "proxy_ip": "test6765757tyfh-IN",
+      "profile": {
+        "ua": "Mozilla/5.0 (Linux; Android 15; A059 Build/AP2A.240505.005) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7851.40 Mobile Safari/537.36",
+        "viewport": {
+          "width": 393,
+          "height": 852
+        },
+        "geo": "GB"
+      },
+      "traffic_source": "youtube",
+      "ts": "2026-07-31T16:57:02Z"
+    }
+  ]
+}
