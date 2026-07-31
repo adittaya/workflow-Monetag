@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS proxy_results (
   UNIQUE (ip, port)
 );
 
+-- Self-heal: if proxy_results already existed without these columns, add them.
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS proto TEXT DEFAULT 'http';
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS latency_ms INTEGER DEFAULT 9999;
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS monetag_ok BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS e2_ok BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 CREATE INDEX IF NOT EXISTS idx_proxy_results_lookup
   ON proxy_results (monetag_ok, latency_ms);
 
