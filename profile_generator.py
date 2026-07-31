@@ -167,91 +167,6 @@ ANDROID_DEVICES = [
     _adb("ZTE Blade V50", "Mozilla/5.0 (Linux; Android 13; Blade V50 Build/TKQ1.221114.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7730.38 Mobile Safari/537.36", 393, 851, 781, 2.75, "Google Inc. (ARM)", _ANR("Mali-G57"), 4, 4),
 ]
 
-# ─── Desktop combos — coherent OS ↔ UA ↔ screen ↔ GPU ─────────────────────────
-
-DESKTOP_COMBOS = [
-    {
-        "name": "Windows 11 / Chrome",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        "viewport": {"width": 1280, "height": 720},
-        "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1040},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Win32",
-        "webgl": {"vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-        "hw": 8, "mem": 16,
-    },
-    {
-        "name": "Windows 11 / Edge",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.2641.42",
-        "viewport": {"width": 1536, "height": 864},
-        "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1040},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Win32",
-        "webgl": {"vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-        "hw": 12, "mem": 16,
-    },
-    {
-        "name": "Windows 10 / Chrome",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-        "viewport": {"width": 1366, "height": 768},
-        "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1040},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Win32",
-        "webgl": {"vendor": "Google Inc. (AMD)", "renderer": "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-        "hw": 8, "mem": 8,
-    },
-    {
-        "name": "macOS Sequoia / Chrome",
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        "viewport": {"width": 1440, "height": 900},
-        "screen": {"width": 2560, "height": 1440, "availWidth": 2560, "availHeight": 1400},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "MacIntel",
-        "webgl": {"vendor": "Google Inc. (Apple)", "renderer": "Apple GPU"},
-        "hw": 10, "mem": 16,
-    },
-    {
-        "name": "macOS Ventura / Chrome",
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-        "viewport": {"width": 1512, "height": 982},
-        "screen": {"width": 2560, "height": 1440, "availWidth": 2560, "availHeight": 1400},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "MacIntel",
-        "webgl": {"vendor": "Google Inc. (Apple)", "renderer": "Apple GPU"},
-        "hw": 8, "mem": 8,
-    },
-    {
-        "name": "Ubuntu / Chrome",
-        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        "viewport": {"width": 1536, "height": 864},
-        "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1050},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Linux x86_64",
-        "webgl": {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630, OpenGL 4.5)"},
-        "hw": 8, "mem": 8,
-    },
-    {
-        "name": "Debian / Chrome",
-        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-        "viewport": {"width": 1920, "height": 1080},
-        "screen": {"width": 2560, "height": 1440, "availWidth": 2560, "availHeight": 1400},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Linux x86_64",
-        "webgl": {"vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (NVIDIA, Mesa NVIDIA GeForce GTX 1060 6GB, OpenGL 4.5)"},
-        "hw": 12, "mem": 16,
-    },
-    {
-        "name": "Windows 11 / Chrome (Iris Xe)",
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
-        "viewport": {"width": 1920, "height": 1080},
-        "screen": {"width": 2560, "height": 1440, "availWidth": 2560, "availHeight": 1400},
-        "dpr": 1, "touch": False, "maxTouchPoints": 0,
-        "platform": "Win32",
-        "webgl": {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-        "hw": 12, "mem": 16,
-    },
-]
-
 # ─── Locale / geo fallbacks ───────────────────────────────────────────────────
 
 LOCALE_PROFILES = [
@@ -303,9 +218,6 @@ YOUTUBE_REFERRERS = [
 CANVAS_NOISE_SEEDS = [0.02, -0.03, 0.01, -0.02, 0.04, -0.01, 0.03, -0.04, 0.015, -0.025]
 AUDIO_OFFSETS = [0.0001, -0.0002, 0.0003, -0.0001, 0.0002, -0.0003, 0.00015, -0.00025]
 
-DESKTOP_WEIGHT = 0.4  # 40% desktop / 60% Android
-
-
 def _pick(arr):
     return random.choice(arr)
 
@@ -315,20 +227,15 @@ def _country_lang(country):
 
 
 def generate_profile(device_kind=None, youtube=False, geo=None):
-    """Build a coherent device profile.
+    """Build a coherent Android device profile.
 
-    device_kind: "desktop" | "mobile" | None (None → 40% desktop / 60% Android)
+    device_kind: ignored — the fleet is 100% Android (desktop cut out). Kept for
+    backward-call compatibility; always picks a random phone.
     geo: optional dict from an IP geolocation lookup —
          {"country": "IN", "timezone": "Asia/Kolkata", "lat": .., "lon": ..}
          When given, timezone/locale/geolocation match the real proxy IP.
     """
-    if device_kind is None:
-        device_kind = "desktop" if random.random() < DESKTOP_WEIGHT else "mobile"
-
-    if device_kind == "desktop":
-        dev = _pick(DESKTOP_COMBOS)
-    else:
-        dev = _pick(ANDROID_DEVICES)
+    dev = _pick(ANDROID_DEVICES)
 
     if geo and geo.get("country"):
         country = geo.get("country", "")
@@ -348,7 +255,7 @@ def generate_profile(device_kind=None, youtube=False, geo=None):
 
     profile = {
         "name": dev["name"],
-        "deviceKind": device_kind,
+        "deviceKind": "mobile",
         "userAgent": dev["ua"],
         "viewport": dict(dev["viewport"]),
         "screen": dict(dev["screen"]),
@@ -375,11 +282,6 @@ def generate_profile(device_kind=None, youtube=False, geo=None):
 
 
 if __name__ == "__main__":
-    kind = None
-    if "desktop=true" in sys.argv or "desktop=1" in sys.argv:
-        kind = "desktop"
-    elif "mobile=true" in sys.argv or "mobile=1" in sys.argv:
-        kind = "mobile"
     youtube = "youtube=true" in sys.argv or "youtube=1" in sys.argv
-    prof = generate_profile(device_kind=kind, youtube=youtube)
+    prof = generate_profile(youtube=youtube)
     print(json.dumps(prof))

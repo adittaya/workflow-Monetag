@@ -16,7 +16,7 @@ Usage:
 
 Env vars (CI / headless):
     MONETAG_SMARTLINK_URL   SmartLink URL to visit (required if no argv)
-    MONETAG_DEVICE         desktop|mobile|auto (default: auto → 40% desktop / 60% Android)
+    MONETAG_DEVICE          deprecated — the fleet is 100% Android (desktop cut out)
     MONETAG_PROXY           http://ip:port proxy for this session (IP geolocation drives locale/timezone)
     MONETAG_TRAFFIC_SOURCE  referrer/UTM profile (default: youtube)
     MONETAG_VERIFY_MODE     strict|lenient (default: strict)
@@ -25,11 +25,6 @@ Env vars (CI / headless):
     MONETAG_HEADLESS        "1" to force headless
     MONETAG_DEBUG           "1" to save screenshots
     MONETAG_HARD_TIMEOUT    per-cycle seconds cap (default: 60)
-    ADSPOWER_PROFILE_ID     when set, drive ONE fixed AdsPower profile via its
-                            Local API (default http://127.0.0.1:50325, override
-                            with ADSPOWER_API_BASE). MONETAG_PROXY is bound to
-                            the profile per view via launch args; the profile's
-                            own device fingerprint is used (no local emulation).
 
 Output:
     view_report.json  — per-cycle view records + aggregate summary
@@ -79,15 +74,6 @@ PROXY = os.environ.get("MONETAG_PROXY", "")
 PROXY_HOST = PROXY.replace("https://", "").replace("http://", "").split(":")[0] if PROXY else ""
 PROXY_IP = PROXY_HOST
 PROXY_PORT = int(PROXY.split(":")[-1]) if PROXY and ":" in PROXY.split("//")[-1] else 0
-
-# ── AdsPower mode ──
-# When ADSPOWER_PROFILE_ID is set, the engine drives the SAME fixed AdsPower
-# profile every view (one stable device fingerprint), binding the current
-# MONETAG_PROXY to it via AdsPower launch args. AdsPower runs locally on the
-# same host (CI runner / VPS) and exposes its Local API on ADSPOWER_API_BASE.
-ADSPOWER_PROFILE_ID = os.environ.get("ADSPOWER_PROFILE_ID", "").strip()
-ADSPOWER_API_BASE = os.environ.get("ADSPOWER_API_BASE", "http://127.0.0.1:50325")
-ADS_POWER = bool(ADSPOWER_PROFILE_ID)
 
 proxy_failures = 0
 proxy_blocked = False
@@ -344,8 +330,6 @@ def _signal_handler(sig, frame):
             driver.quit()
         except Exception:
             pass
-    if ADS_POWER:
-        _ads_power_stop()
     sys.exit(130)
 
 
@@ -972,20 +956,8 @@ def _build_stealth_js(p):
 
 
 # ══════════════════════════════════════════════════════════════
-#  Device selection & IP-based geolocation
+#  IP-based geolocation
 # ══════════════════════════════════════════════════════════════
-
-def _pick_device_kind():
-    """Return 'desktop'|'mobile'|None. MONETAG_DEVICE forces it; default None
-    lets generate_profile roll the 40% desktop / 60% Android split."""
-    env = os.environ.get("MONETAG_DEVICE", "").strip().lower()
-    if env in ("desktop", "mobile", "android"):
-        return "desktop" if env == "desktop" else "mobile"
-    legacy = os.environ.get("MONETAG_MOBILE", "")
-    if legacy:
-        return "desktop" if legacy == "0" else "mobile"
-    return None
-
 
 def _lookup_proxy_geo(ip):
     """Resolve a proxy IP to country/timezone/coords via a free geo API."""
@@ -1032,92 +1004,12 @@ def _lookup_proxy_geo(ip):
 
 
 # ══════════════════════════════════════════════════════════════
-#  AdsPower Local API — drive one fixed profile, bind proxy per view
-# ══════════════════════════════════════════════════════════════
-
-def _ads_power_api(path, params=None):
-    """Call the AdsPower Local API. Returns parsed JSON or raises."""
-    import urllib.request
-    import urllib.parse
-    url = ADSPOWER_API_BASE + path
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
-
-
-def _ads_power_stop():
-    try:
-        _ads_power_api("/api/v1/browser/stop", {"user_id": ADSPOWER_PROFILE_ID})
-    except Exception:
-        pass
-
-
-def _ads_power_start(proxy):
-    """Start the fixed AdsPower profile with the session proxy bound via launch
-    args. Returns (debuggerAddress, data). The profile's own fingerprint
-    (device/OS/TLS) is left untouched — the proxy rides on the command line."""
-    _ads_power_stop()
-    launch = [f"--proxy-server={proxy}"] if proxy else []
-    data = _ads_power_api("/api/v1/browser/start", {
-        "user_id": ADSPOWER_PROFILE_ID,
-        "open_tabs": 1,
-        "ip_tab": 0,
-        "launch_args": json.dumps(launch),
-    })
-    if not data or data.get("code") != 0:
-        raise RuntimeError(f"AdsPower start failed: {data}")
-    info = data.get("data") or {}
-    addr = info.get("debuggerAddress") or (
-        f"127.0.0.1:{info.get('debug_port')}" if info.get("debug_port") else "")
-    if not addr:
-        raise RuntimeError(f"AdsPower returned no debugger address: {data}")
-    return addr, info
-
-
-# ══════════════════════════════════════════════════════════════
 #  Driver creation
 # ══════════════════════════════════════════════════════════════
 
 def _create_driver():
     global driver, profile
-    if ADS_POWER:
-        proxy = os.environ.get("MONETAG_PROXY", "")
-        addr, info = _ads_power_start(proxy)
-        log(f"ads-power profile {ADSPOWER_PROFILE_ID} debugger={addr} proxy={proxy or 'none'}")
-        options = Options()
-        options.add_experimental_option("debuggerAddress", addr)
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        options.page_load_strategy = "none"
-        chromedriver_paths = [
-            "/usr/bin/chromedriver",
-            "/snap/bin/chromium.chromedriver",
-            "/usr/lib/chromium-browser/chromedriver",
-            "/usr/lib/chromium/chromedriver",
-            "/usr/local/bin/chromedriver",
-        ]
-        driver = None
-        for cpath in chromedriver_paths:
-            if os.path.exists(cpath) and _check_native_binary(cpath):
-                try:
-                    driver = webdriver.Chrome(service=Service(executable_path=cpath), options=options)
-                    break
-                except Exception:
-                    continue
-        if driver is None:
-            from webdriver_manager.chrome import ChromeDriverManager
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(0)
-        try:
-            driver.execute_cdp_cmd("Network.enable", {"maxTotalBufferSize": 1048576})
-        except Exception:
-            pass
-        _inject_traffic_source()
-        return
-    kind = _pick_device_kind()
+    kind = "mobile"
     geo = _lookup_proxy_geo(PROXY_IP)
     profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
     profile["uaMeta"] = _ua_metadata(profile)
@@ -1139,23 +1031,18 @@ def _create_driver():
     options.add_argument("--use-gl=swiftshader")
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
     vp = profile["viewport"]
-    is_mobile = profile["deviceKind"] == "mobile"
+    # ChromeDriver native mobile emulation: metrics + UA + touch in one shot
+    options.add_experimental_option("mobileEmulation", {
+        "deviceMetrics": {
+            "width": vp["width"],
+            "height": vp["height"],
+            "pixelRatio": profile["deviceScaleFactor"],
+            "mobile": True,
+            "touch": True,
+        },
+        "userAgent": profile["userAgent"],
+    })
 
-    if is_mobile:
-        # ChromeDriver native mobile emulation: metrics + UA + touch in one shot
-        options.add_experimental_option("mobileEmulation", {
-            "deviceMetrics": {
-                "width": vp["width"],
-                "height": vp["height"],
-                "pixelRatio": profile["deviceScaleFactor"],
-                "mobile": True,
-                "touch": True,
-            },
-            "userAgent": profile["userAgent"],
-        })
-    else:
-        options.add_argument(f"--window-size={vp['width']},{vp['height']}")
-        options.add_argument(f"--user-agent={profile['userAgent']}")
 
     headless = os.environ.get("MONETAG_HEADLESS") == "1"
     if headless:
@@ -1235,7 +1122,7 @@ def _create_driver():
 
 def _ua_metadata(profile):
     """Build a coherent userAgentMetadata dict (Chrome's userAgentData) from the
-    emulated profile so the browser's NATIVE userAgentData reports the claimed
+    Android profile so the browser's NATIVE userAgentData reports the claimed
     device, not the real host OS. Chrome only honors this when it is passed via
     Emulation.setUserAgentOverride.userAgentMetadata."""
     ua = profile.get("userAgent", "")
@@ -1243,21 +1130,7 @@ def _ua_metadata(profile):
     major = m.group(1) if m else "151"
     full = m.group(0).split("/", 1)[1] if m else "151.0.0.0"
     am = re.search(r"Android (\d+)", ua)
-    plat = profile.get("platform", "")
-    is_mobile = profile.get("deviceKind") == "mobile"
-    if is_mobile:
-        platform = "Android"
-        platform_version = (am.group(1) if am else "13") + ".0.0"
-        arch, model, bitness = "", profile.get("name", ""), ""
-    elif plat == "Win32":
-        platform, platform_version = "Windows", "10.0.0"
-        arch, model, bitness = "x86", "", "64"
-    elif plat == "MacIntel":
-        platform, platform_version = "macOS", "15.3.0"
-        arch, model, bitness = "x86", "", "64"
-    else:
-        platform, platform_version = "Linux", "0.0.0"
-        arch, model, bitness = "x86", "", "64"
+    platform_version = (am.group(1) if am else "13") + ".0.0"
 
     def brands(v):
         return [
@@ -1270,12 +1143,12 @@ def _ua_metadata(profile):
         "brands": brands(major),
         "fullVersionList": brands(major),
         "fullVersion": full,
-        "platform": platform,
+        "platform": "Android",
         "platformVersion": platform_version,
-        "architecture": arch,
-        "model": model,
-        "mobile": bool(is_mobile),
-        "bitness": bitness,
+        "architecture": "",
+        "model": profile.get("name", ""),
+        "mobile": True,
+        "bitness": "",
         "wow64": False,
     }
 
@@ -1302,23 +1175,22 @@ def _apply_cdp_profile(profile):
     except Exception:
         pass
 
-    if profile["deviceKind"] == "mobile":
-        vp = profile["viewport"]
-        scr = profile["screen"]
-        try:
-            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-                "width": vp["width"], "height": vp["height"],
-                "deviceScaleFactor": profile["deviceScaleFactor"],
-                "mobile": True, "screenWidth": scr["width"], "screenHeight": scr["height"],
-            })
-        except Exception:
-            pass
-        try:
-            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-                "enabled": True, "maxTouchPoints": profile["maxTouchPoints"],
-            })
-        except Exception:
-            pass
+    vp = profile["viewport"]
+    scr = profile["screen"]
+    try:
+        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+            "width": vp["width"], "height": vp["height"],
+            "deviceScaleFactor": profile["deviceScaleFactor"],
+            "mobile": True, "screenWidth": scr["width"], "screenHeight": scr["height"],
+        })
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled": True, "maxTouchPoints": profile["maxTouchPoints"],
+        })
+    except Exception:
+        pass
 
     if profile.get("geoLat") is not None and profile.get("geoLon") is not None:
         try:
@@ -1895,8 +1767,6 @@ def run_view_cycle(cycle_idx):
         report_proxy_failure("smartlink-nav-empty")
         driver.quit()
         driver = None
-        if ADS_POWER:
-            _ads_power_stop()
         return None, 2
 
     # Follow the redirect chain
@@ -1964,8 +1834,6 @@ def run_view_cycle(cycle_idx):
     except Exception:
         pass
     driver = None
-    if ADS_POWER:
-        _ads_power_stop()
     return record, 0
 
 
@@ -2127,11 +1995,6 @@ if __name__ == "__main__":
         if driver:
             try:
                 driver.quit()
-            except Exception:
-                pass
-        if ADS_POWER:
-            try:
-                _ads_power_stop()
             except Exception:
                 pass
         sys.exit(1)
