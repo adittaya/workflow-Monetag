@@ -52,7 +52,7 @@ env:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,62 +110,51 @@ jobs:
 
       - name: Run automation (with proxy retry)
         id: automate
-        timeout-minutes: 20
+        timeout-minutes: 2
         env:
           CHROMIUM_PATH: /usr/bin/google-chrome
         run: |
-          MAX_ATTEMPTS=3
-          MIN_RUNTIME=120
+          # Each view is capped at ~60s by the engine (MONETAG_HARD_TIMEOUT=60).
+          # Total automation is capped at ~2 min: 1 proxy attempt + 1 direct fallback.
+          MAX_ATTEMPTS=2
+          ENGINE_TIMEOUT=90
           CURRENT_PROXY="${{ steps.proxy.outputs.proxy }}"
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            PROXY="$CURRENT_PROXY"
-            if [ -z "$PROXY" ]; then
-              echo "No proxy available, running direct..."
-              unset MONETAG_PROXY
+
+          get_verified() {
+            if [ -f view_report.json ]; then
+              python3 -c "import json; r=json.load(open('view_report.json')); print(r['summary'].get('verified_or_likely',0))" 2>/dev/null || echo 0
             else
-              export MONETAG_PROXY="http://$PROXY"
+              echo 0
             fi
+          }
 
-            echo "=== Attempt $attempt/$MAX_ATTEMPTS (proxy: $PROXY) ==="
-            echo "MONETAG_PROXY=$MONETAG_PROXY"
-            START=$(date +%s)
-            timeout 1180 python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
-              --views "$MONETAG_VIEWS" \
-              --verify-mode "$MONETAG_VERIFY_MODE" \
-              --traffic-source "$MONETAG_TRAFFIC_SOURCE" 2>&1 || true
-            END=$(date +%s)
-            ELAPSED=$((END - START))
-
-            echo "Attempt $attempt finished in ${ELAPSED}s"
-            if [ "$ELAPSED" -ge "$MIN_RUNTIME" ]; then
-              echo "Ran for ${ELAPSED}s (>= ${MIN_RUNTIME}s) — proxy worked"
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            if [ "$(get_verified)" -ge "$MONETAG_VIEWS" ]; then
+              echo "Already verified — skipping attempt $attempt"
               break
             fi
 
-            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
-              echo "Ran only ${ELAPSED}s (< ${MIN_RUNTIME}s) — proxy likely blocked, rotating..."
-              blacklisted="$PROXY"
-              NEW_PROXY=$(python3 proxy_rotator.py premium | tail -1)
-              echo "New proxy: $NEW_PROXY (blacklisted: $blacklisted)"
-              CURRENT_PROXY="$NEW_PROXY"
+            if [ "$attempt" -eq 1 ]; then
+              if [ -z "$CURRENT_PROXY" ]; then
+                echo "No proxy available, running direct..."
+                unset MONETAG_PROXY
+              else
+                export MONETAG_PROXY="http://$CURRENT_PROXY"
+              fi
+            else
+              echo "Proxy attempt did not verify — retrying without proxy (direct)"
+              unset MONETAG_PROXY
             fi
-          done
 
-          # If no verified views yet, try one more time WITHOUT proxy
-          VERIFIED=0
-          if [ -f view_report.json ]; then
-            VERIFIED=$(python3 -c "import json; r=json.load(open('view_report.json')); print(r['summary'].get('verified_or_likely',0))" 2>/dev/null || echo 0)
-          fi
-          if [ "$VERIFIED" -lt "$MONETAG_VIEWS" ]; then
-            echo "=== Trying without proxy (direct connection) ==="
-            unset MONETAG_PROXY
-            timeout 1180 python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
+            echo "=== Attempt $attempt/$MAX_ATTEMPTS (proxy: ${MONETAG_PROXY:-direct}) ==="
+            timeout $ENGINE_TIMEOUT python3 monetag_automation.py "$MONETAG_SMARTLINK_URL" \
               --views "$MONETAG_VIEWS" \
               --verify-mode "$MONETAG_VERIFY_MODE" \
               --traffic-source "$MONETAG_TRAFFIC_SOURCE" 2>&1 || true
-          fi
+            echo "Verified views so far: $(get_verified)"
+          done
 
-          # Capture report summary for the summary step
+          # Capture report summary
           if [ -f view_report.json ]; then
             VERDICTS=$(python3 -c "import json; r=json.load(open('view_report.json')); s=r['summary']; print('verified_or_likely=%d' % s.get('verified_or_likely',0))" 2>/dev/null || echo "verified_or_likely=0")
             echo "status=$(echo "$VERDICTS" | cut -d= -f2 | awk '$1>0 {print "success"} $1==0 {print "failure"}')" >> $GITHUB_OUTPUT
