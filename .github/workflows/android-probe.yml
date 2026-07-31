@@ -1,13 +1,16 @@
-name: Android Probe (real arm64 emulator)
+name: Android Probe (real x86_64 emulator + KVM)
 
 on:
   workflow_dispatch:
 
 jobs:
   probe:
-    # Apple Silicon runner: arm64 Android images run natively via Hypervisor.framework.
-    # x86_64 images would be unaccelerated QEMU here — do NOT switch arch.
-    runs-on: macos-latest
+    # ubuntu-latest exposes /dev/kvm (nested virt) — x86_64 Android images run
+    # hardware-accelerated here. macOS hosted runners do NOT expose HVF
+    # (HV_UNSUPPORTED) and GitHub-hosted macOS is arm64, so arm64 images there
+    # are unaccelerated too — that path is dead. API 35 (Android 15) + Opera
+    # x86_64: Chrome/Edge/Firefox dropped x86_64; Opera still ships it.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       MONETAG_SMARTLINK_URL: ${{ secrets.MONETAG_SMARTLINK_URL }}
@@ -21,18 +24,23 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Run headless arm64 Android emulator + collect evidence
+      - name: Run headless x86_64 Android emulator + collect evidence
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
-          target: google_apis_playstore
-          arch: arm64-v8a
+          target: google_apis
+          arch: x86_64
           profile: pixel_7
           disable-animations: true
           headless: true
           script: |
             set -e
             mkdir -p probe
+
+            echo "=== KVM / ACCEL ==="
+            ls -l /dev/kvm || true
+            $ANDROID_HOME/emulator/emulator -accel-check || true
+
             echo "=== DEVICE / BUILD FINGERPRINT ==="
             adb shell getprop ro.build.fingerprint
             adb shell getprop ro.product.model
@@ -49,33 +57,95 @@ jobs:
             adb shell getprop ro.bootimage.build.fingerprint
 
             echo "=== BROWSERS PRESENT ==="
-            adb shell pm list packages | grep -iE 'chrome|webview' || echo "NONE"
+            adb shell pm list packages | grep -iE 'opera|chrome|webview' || echo "NONE (besides webview)"
+
+            echo "=== INSTALL OPERA x86_64 (APKMirror bundle) ==="
+            python3 - <<'PYEOF'
+            import urllib.request, urllib.error, re, time, os, zipfile, sys
+            H = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+            def get(url, tries=4):
+                for i in range(tries):
+                    try:
+                        return urllib.request.urlopen(urllib.request.Request(url, headers=H), timeout=25).read().decode('utf-8', 'ignore')
+                    except urllib.error.HTTPError as e:
+                        if e.code == 429 and i < tries - 1:
+                            time.sleep(6); continue
+                        raise
+            # 1. opera app page -> latest release
+            html = get("https://www.apkmirror.com/apk/opera-software-asa/opera/")
+            rels = [r for r in dict.fromkeys(re.findall(r'href="(/apk/opera-software-asa/opera/[^"]*release/)"', html)) if 'disqus' not in r]
+            if not rels:
+                print("OPERAINSTALL=FAIL no release page"); sys.exit(1)
+            rel = rels[0]
+            print("release:", rel)
+            # 2. release -> variant pages -> pick x86_64
+            dl = get("https://www.apkmirror.com" + rel)
+            dlp = [r for r in dict.fromkeys(re.findall(r'href="(/apk/opera-software-asa/opera/[^"]*android-apk-download/)"', dl)) if 'disqus' not in r]
+            dlink = None
+            for d in dlp:
+                var = get("https://www.apkmirror.com" + d)
+                h = re.search(r'<h1[^>]*>(.*?)</h1>', var, re.S)
+                title = re.sub(r'<[^>]+>', '', h.group(1)).strip() if h else "?"
+                if 'x86_64' in title:
+                    print("variant:", title)
+                    m = re.search(r'href="(/wp-content/themes/APKMirror/download\.php\?id=\d+&key=[^"]+)"', var)
+                    if m:
+                        dlink = m.group(1)
+                    break
+                time.sleep(1.5)
+            if not dlink:
+                print("OPERAINSTALL=FAIL no x86_64 variant"); sys.exit(1)
+            # 3. download the bundle (follow 302 to R2)
+            req = urllib.request.Request("https://www.apkmirror.com" + dlink.replace('&amp;', '&'), headers=H)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            open("probe/opera.apkm", "wb").write(data)
+            print("bundle bytes:", len(data))
+            # 4. extract apks
+            with zipfile.ZipFile("probe/opera.apkm") as z:
+                z.extractall("probe/opera_split")
+            apks = sorted(f for f in os.listdir("probe/opera_split") if f.endswith(".apk"))
+            print("split apks:", apks)
+            open("probe/opera_apks.txt", "w").write("\n".join(apks))
+            PYEOF
+            if [ -f probe/opera_apks.txt ]; then
+              adb install-multiple probe/opera_split/*.apk
+              adb shell pm list packages | grep -i opera || echo "opera install FAILED"
+            else
+              echo "Opera download failed — continuing with evidence only"
+            fi
 
             echo "=== FORCE-PROVISION (skip setup wizard) ==="
             adb shell settings put global device_provisioned 1 || true
             adb shell settings put secure user_setup_complete 1 || true
 
             echo "=== UA / CLIENT-HINT CAPTURE (real browser headers) ==="
-            cat > probe/ua_server.py <<'PYEOF'
+            cat > probe/ua_server.py <<'UAEOF'
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
-                    with open("probe/ua_capture.txt","a") as f:
-                        f.write("PATH="+self.path+"\n")
-                        for k,v in self.headers.items():
-                            if k.lower() in ("user-agent","sec-ch-ua","sec-ch-ua-mobile","sec-ch-ua-platform","sec-ch-ua-arch","sec-ch-ua-platform-version","sec-ch-ua-model","x-requested-with","accept-language"):
+                    with open("probe/ua_capture.txt", "a") as f:
+                        f.write("PATH=" + self.path + "\n")
+                        for k, v in self.headers.items():
+                            if k.lower() in ("user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-ch-ua-arch", "sec-ch-ua-platform-version", "sec-ch-ua-model", "x-requested-with", "accept-language"):
                                 f.write(f"{k}: {v}\n")
                         f.write("---\n")
                     self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-                def log_message(self,*a): pass
-            HTTPServer(("127.0.0.1",8888),H).serve_forever()
-            PYEOF
+                def log_message(self, *a): pass
+            HTTPServer(("127.0.0.1", 8888), H).serve_forever()
+            UAEOF
             python3 probe/ua_server.py &
             SRV=$!
             sleep 1
             adb reverse tcp:8888 tcp:8888
-            adb shell am start -a android.intent.action.VIEW -d "http://127.0.0.1:8888/ua" || true
-            sleep 8
+            PKG=$(adb shell pm list packages | grep -i opera | head -1 | sed 's/package://' | tr -d '\r')
+            echo "opera pkg: $PKG"
+            if [ -n "$PKG" ]; then
+              adb shell am start -a android.intent.action.VIEW -d "http://127.0.0.1:8888/ua" -n "${PKG}/com.opera.browser.activities.IntentHandlingActivity" || adb shell am start -a android.intent.action.VIEW -d "http://127.0.0.1:8888/ua" || true
+            else
+              adb shell am start -a android.intent.action.VIEW -d "http://127.0.0.1:8888/ua" || true
+            fi
+            sleep 10
             adb exec-out screencap -p > probe/ua_screen.png || true
             kill $SRV || true
             echo "--- UA CAPTURE ---"
@@ -83,7 +153,11 @@ jobs:
 
             echo "=== SMARTLINK OPEN ==="
             if [ -n "$MONETAG_SMARTLINK_URL" ]; then
-              adb shell am start -a android.intent.action.VIEW -d "$MONETAG_SMARTLINK_URL" || echo "am start failed"
+              if [ -n "$PKG" ]; then
+                adb shell am start -a android.intent.action.VIEW -d "$MONETAG_SMARTLINK_URL" -n "${PKG}/com.opera.browser.activities.IntentHandlingActivity" || adb shell am start -a android.intent.action.VIEW -d "$MONETAG_SMARTLINK_URL" || true
+              else
+                adb shell am start -a android.intent.action.VIEW -d "$MONETAG_SMARTLINK_URL" || echo "am start failed"
+              fi
               sleep 30
               adb exec-out screencap -p > probe/smartlink_1.png || true
               adb shell dumpsys activity activities | grep -iE 'mResumedActivity|topResumed|http' | head -30 || true
@@ -94,7 +168,7 @@ jobs:
 
             echo "=== FULL PROBE EVIDENCE ==="
             adb shell getprop > probe/getprop_full.txt
-            adb shell dumpsys package com.android.chrome > probe/chrome_pkg.txt 2>/dev/null || echo "chrome pkg missing" > probe/chrome_pkg.txt
+            adb shell dumpsys package com.opera.browser > probe/opera_pkg.txt 2>/dev/null || echo "opera pkg missing" > probe/opera_pkg.txt
             adb shell ls /sdcard > probe/sdcard.txt || true
 
       - name: Upload probe artifacts
