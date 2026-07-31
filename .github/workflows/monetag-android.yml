@@ -1,8 +1,8 @@
 name: Monetag Android Loop (real Chrome)
 
 on:
-  # cron paused during validation — re-enable once Android counting is
-  # dashboard-confirmed (previously: '5 * * * *')
+  schedule:
+    - cron: '5 * * * *'
   workflow_dispatch:
     inputs:
       smartlink_url:
