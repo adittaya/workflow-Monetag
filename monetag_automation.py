@@ -25,6 +25,10 @@ Env vars (CI / headless):
     MONETAG_HEADLESS        "1" to force headless
     MONETAG_DEBUG           "1" to save screenshots
     MONETAG_HARD_TIMEOUT    per-cycle seconds cap (default: 60)
+    MONETAG_ANDROID         "1" = drive real Android Chrome via Appium (emulator)
+    MONETAG_APPIUM_URL      Appium server base URL (default: http://127.0.0.1:4723)
+    MONETAG_CHROMEDRIVER    chromedriver binary for emulator Chrome (default: PATH)
+    MONETAG_ANDROID_UDID    device serial (default: emulator-5554)
 
 Output:
     view_report.json  — per-cycle view records + aggregate summary
@@ -39,7 +43,9 @@ import os
 import random
 import queue
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -75,6 +81,13 @@ PROXY = os.environ.get("MONETAG_PROXY", "")
 PROXY_HOST = PROXY.replace("https://", "").replace("http://", "").split(":")[0] if PROXY else ""
 PROXY_IP = PROXY_HOST
 PROXY_PORT = int(PROXY.split(":")[-1]) if PROXY and ":" in PROXY.split("//")[-1] else 0
+
+# Real-Android mode (MONETAG_ANDROID=1): drive a booted emulator's real Chrome
+# through Appium instead of a local desktop-headless Chromium. The device IS the
+# genuine fingerprint — no UA/JS spoofing, only --proxy-server per view.
+ANDROID_MODE = os.environ.get("MONETAG_ANDROID") == "1"
+APPIUM_URL = os.environ.get("MONETAG_APPIUM_URL", "http://127.0.0.1:4723")
+ANDROID_UDID = os.environ.get("MONETAG_ANDROID_UDID", "emulator-5554")
 
 proxy_failures = 0
 proxy_blocked = False
@@ -1013,6 +1026,9 @@ def _lookup_proxy_geo(ip):
 
 def _create_driver():
     global driver, profile
+    if ANDROID_MODE:
+        _create_android_driver()
+        return
     kind = "mobile"
     geo = _lookup_proxy_geo(PROXY_IP)
     profile = generate_profile(device_kind=kind, youtube=TRAFFIC_SOURCE == "youtube", geo=geo)
@@ -1122,6 +1138,68 @@ def _create_driver():
     except Exception:
         pass
     driver.execute_script(stealth_js)
+
+
+def _create_android_driver():
+    """Create a WebDriver session against a booted Android emulator's REAL
+    Chrome via Appium (UiAutomator2 + chromedriver). No UA/metrics/JS spoofing —
+    the device fingerprint is genuine. The current MONETAG_PROXY is bound with
+    --proxy-server so each view gets a fresh proxy while keeping the same
+    device identity. CDP-dependent helpers (_apply_cdp_profile, stealth,
+    referrer injection) are skipped: chromedriver-on-Android exposes a reduced
+    command surface and the whole point is NOT to emulate."""
+    global driver, profile
+    geo = _lookup_proxy_geo(PROXY_IP)
+    profile = {
+        "deviceKind": "mobile",
+        "name": os.environ.get("MONETAG_ANDROID_DEVICE", "Pixel 7"),
+        "locale": "en-US",
+        "timezone": (geo or {}).get("timezone") or "Asia/Kolkata",
+        "languages": ["en-US", "en"],
+    }
+    if geo:
+        log(f"ip geo: {geo.get('country')} {geo.get('timezone')}")
+    log(f"profile: android {profile['name']} tz={profile['timezone']} "
+        f"proxy={PROXY_IP}:{PROXY_PORT}")
+
+    options = Options()
+    options.set_capability("platformName", "Android")
+    options.set_capability("browserName", "Chrome")
+    options.set_capability("appium:automationName", "UiAutomator2")
+    options.set_capability("appium:deviceName", ANDROID_UDID)
+    options.set_capability("appium:udid", ANDROID_UDID)
+    options.set_capability("appium:noReset", True)
+    options.set_capability("appium:adbExecTimeout", 120000)
+
+    # Best-effort: kill any Chrome left over from the previous view so the new
+    # Appium session relaunches it cleanly with the new --proxy-server.
+    try:
+        subprocess.run(
+            ["adb", "-s", ANDROID_UDID, "shell", "am", "force-stop", "com.android.chrome"],
+            capture_output=True, timeout=15,
+        )
+    except Exception:
+        pass
+
+    cd = os.environ.get("MONETAG_CHROMEDRIVER") or shutil.which("chromedriver")
+    if cd:
+        options.set_capability("appium:chromedriverExecutable", cd)
+
+    goog_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-popup-blocking",
+    ]
+    if PROXY:
+        goog_args.append(f"--proxy-server=http://{PROXY}")
+    options.set_capability("goog:chromeOptions", {"args": goog_args})
+    options.page_load_strategy = "none"
+
+    driver = webdriver.Remote(APPIUM_URL, options=options)
+    driver.set_page_load_timeout(30)
+    driver.implicitly_wait(0)
+    log("android driver ready (Appium + real Chrome)")
 
 
 def _ua_metadata(profile):
@@ -1911,7 +1989,7 @@ def main():
 
     log("=" * 50)
     log(f"Monetag SmartLink automation — views={VIEWS_TOTAL} verify_mode={VERIFY_MODE} "
-        f"traffic={TRAFFIC_SOURCE} proxy={bool(PROXY)}")
+        f"traffic={TRAFFIC_SOURCE} proxy={bool(PROXY)} android={ANDROID_MODE}")
     if DEBUG:
         log("debug mode active")
     log(f"smartlink: {SMARTLINK_URL[:110]}")

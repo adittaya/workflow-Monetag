@@ -1,0 +1,93 @@
+name: Android Proxy Probe (real Chrome + residential proxy)
+
+on:
+  workflow_dispatch:
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET }}
+  MONETAG_SMARTLINK_URL: ${{ secrets.MONETAG_SMARTLINK_URL }}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare KVM + audio libs
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpulse0
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Boot emulator + run proxy probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          disable-linux-hw-accel: false
+          emulator-options: -accel on -no-window
+          script: |
+            set -e
+            mkdir -p evidence
+
+            echo "=== PREP (root + FRE skip) ==="
+            adb root
+            sleep 2
+            adb wait-for-device
+            adb shell 'echo "_ --disable-fre --no-first-run --disable-sync" > /data/local/tmp/chrome-command-line'
+            adb shell chmod 644 /data/local/tmp/chrome-command-line
+            adb shell am force-stop com.android.chrome
+
+            echo "=== INSTALL APPIUM + UIAUTOMATOR2 + CHROMEDRIVER 124 ==="
+            sudo npm install -g appium@3 --no-fund --no-audit
+            appium driver install uiautomator2
+            sudo npm install -g chromedriver@124 --no-fund --no-audit
+            which chromedriver || ls /usr/local/lib/node_modules/chromedriver/lib/chromedriver/chromedriver || echo "chromedriver missing"
+            python3 -m pip install --user --quiet selenium
+
+            echo "=== CONFIGURE SUPABASE ==="
+            python3 config.py --set supabase_url "$SUPABASE_URL"
+            python3 config.py --set supabase_key "$SUPABASE_KEY"
+            python3 config.py --set supabase_secret "$SUPABASE_SECRET"
+            python3 config.py --set proxy_enabled true
+            python3 config.py --set proxy_tier premium
+
+            echo "=== START APPIUM ==="
+            nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &
+            sleep 20
+
+            echo "=== FETCH PROXY FROM POOL ==="
+            PROXY=$(timeout 90 python3 proxy_rotator.py premium | tail -1)
+            echo "PROXY=$PROXY"
+            if [ -z "$PROXY" ]; then
+              echo "::warning::No proxy from pool — cannot validate proxy path"
+              exit 0
+            fi
+
+            echo "=== PROXY + SMARTLINK PROBE (real Android Chrome) ==="
+            export MONETAG_PROXY="http://$PROXY"
+            python3 probe/android_proxy.py || true
+
+            echo "=== APPIUM LOG TAIL ==="
+            tail -40 /tmp/appium.log || true
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-proxy-evidence
+          path: evidence/
+          if-no-files-found: warn

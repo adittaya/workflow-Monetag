@@ -1,0 +1,221 @@
+name: Monetag Android Loop (real Chrome)
+
+on:
+  schedule:
+    - cron: '5 * * * *'
+  workflow_dispatch:
+    inputs:
+      smartlink_url:
+        description: 'Monetag SmartLink URL (go.oclasrv.com/afu.php?zoneid=XXXXX)'
+        required: false
+        default: ''
+      traffic_source:
+        description: 'youtube|google|facebook|twitter|direct'
+        required: false
+        default: 'youtube'
+      traffic_source_url:
+        description: 'Traffic source URL used as the referrer'
+        required: false
+        default: ''
+      verify_mode:
+        description: 'strict|lenient'
+        required: false
+        default: 'strict'
+      views:
+        description: 'Number of view cycles to run'
+        required: false
+        default: '3'
+      no_relay:
+        description: 'Set to "1" to skip the relay (test mode)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [relay]
+
+concurrency:
+  group: monetag-android-${{ github.repository }}${{ github.event.inputs.no_relay && '-test' || '' }}
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  SUPABASE_SECRET: ${{ secrets.SUPABASE_SECRET }}
+  MONETAG_SMARTLINK_URL: ${{ github.event.inputs.smartlink_url || github.event.client_payload.smartlink_url || secrets.MONETAG_SMARTLINK_URL || '' }}
+  MONETAG_TRAFFIC_SOURCE: ${{ github.event.inputs.traffic_source || github.event.client_payload.traffic_source || 'youtube' }}
+  MONETAG_REFERER: ${{ github.event.inputs.traffic_source_url || github.event.client_payload.traffic_source_url || secrets.MONETAG_REFERER || '' }}
+  MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
+  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '3' }}
+  MONETAG_ROTATE_MODE: 'fast'
+  RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || '' }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate SmartLink URL
+        run: |
+          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
+            echo "::error::MONETAG_SMARTLINK_URL is empty — cannot continue"
+            exit 1
+          fi
+          echo "SmartLink: $MONETAG_SMARTLINK_URL"
+          echo "Traffic source: $MONETAG_TRAFFIC_SOURCE"
+          echo "Views: $MONETAG_VIEWS"
+
+      - name: Save run config
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          cfg = {
+            "smartlink_url": os.environ.get("MONETAG_SMARTLINK_URL", ""),
+            "traffic_source": os.environ.get("MONETAG_TRAFFIC_SOURCE", ""),
+            "traffic_source_url": os.environ.get("MONETAG_REFERER", ""),
+            "verify_mode": os.environ.get("MONETAG_VERIFY_MODE", ""),
+            "views": os.environ.get("MONETAG_VIEWS", ""),
+            "platform": "android-emulator-real-chrome",
+          }
+          with open("run_config.json", "w") as f:
+              json.dump(cfg, f, indent=2)
+          print("Saved run config: " + json.dumps({k: ("***" if k in ("smartlink_url", "traffic_source_url") else v) for k, v in cfg.items()}))
+          PYEOF
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare KVM + audio libs
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpulse0
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Boot emulator + run Android engine
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          disable-linux-hw-accel: false
+          emulator-options: -accel on -no-window
+          script: |
+            set -e
+            mkdir -p evidence
+
+            echo "=== PREP (root + FRE skip) ==="
+            adb root
+            sleep 2
+            adb wait-for-device
+            adb shell 'echo "_ --disable-fre --no-first-run --disable-sync" > /data/local/tmp/chrome-command-line'
+            adb shell chmod 644 /data/local/tmp/chrome-command-line
+            adb shell am force-stop com.android.chrome
+
+            echo "=== INSTALL APPIUM + UIAUTOMATOR2 + CHROMEDRIVER 124 ==="
+            sudo npm install -g appium@3 --no-fund --no-audit
+            appium driver install uiautomator2
+            sudo npm install -g chromedriver@124 --no-fund --no-audit
+            which chromedriver || ls /usr/local/lib/node_modules/chromedriver/lib/chromedriver/chromedriver || echo "chromedriver missing"
+            python3 -m pip install --user --quiet selenium
+
+            echo "=== CONFIGURE SUPABASE ==="
+            python3 config.py --set supabase_url "$SUPABASE_URL"
+            python3 config.py --set supabase_key "$SUPABASE_KEY"
+            python3 config.py --set supabase_secret "$SUPABASE_SECRET"
+            python3 config.py --set proxy_enabled true
+            python3 config.py --set proxy_tier premium
+
+            echo "=== START APPIUM ==="
+            nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &
+            sleep 20
+
+            echo "=== RUN ANDROID ENGINE (real Chrome + Supabase proxies) ==="
+            timeout 600 python3 probe/run_engine_android.py 2>&1 || true
+
+            echo "=== APPIUM LOG TAIL ==="
+            tail -40 /tmp/appium.log || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-config
+          path: |
+            run_config.json
+            view_report.json
+            run_status.txt
+            evidence/*.png
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Relay — trigger next run
+        if: always() && github.event.inputs.no_relay != '1'
+        env:
+          TRIGGER_TOKEN: ${{ secrets.LOOP_TRIGGER_TOKEN }}
+        run: |
+          if [ -z "$RELAY_TARGET_REPO" ]; then
+            echo "::warning::RELAY_TARGET_REPO secret not set — relay skipped."
+            exit 0
+          fi
+          if [ -z "$MONETAG_SMARTLINK_URL" ]; then
+            echo "::warning::MONETAG_SMARTLINK_URL empty — relay would fire with empty payload, skipping"
+            exit 0
+          fi
+
+          PAYLOAD='{"event_type":"relay","client_payload":{"smartlink_url":"'"${MONETAG_SMARTLINK_URL}"'","traffic_source":"'"${MONETAG_TRAFFIC_SOURCE}"'","traffic_source_url":"'"${MONETAG_REFERER}"'","verify_mode":"'"${MONETAG_VERIFY_MODE}"'","views":"'"${MONETAG_VIEWS}"'"}}'
+
+          for TOKEN_VAR in TRIGGER_TOKEN GITHUB_TOKEN; do
+            TOKEN="${!TOKEN_VAR}"
+            if [ -z "$TOKEN" ]; then
+              echo "$TOKEN_VAR is empty — skipping"
+              continue
+            fi
+            echo "Trying relay with $TOKEN_VAR..."
+            for attempt in 1 2 3; do
+              HTTP_CODE=$(curl -s -o /tmp/relay_resp.txt -w "%{http_code}" -X POST \
+                -H "Authorization: token $TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${RELAY_TARGET_REPO}/dispatches" \
+                -d "$PAYLOAD")
+              echo "  Attempt $attempt: HTTP $HTTP_CODE"
+              if [ "$HTTP_CODE" = "204" ]; then
+                echo "Relay dispatched successfully via $TOKEN_VAR"
+                exit 0
+              fi
+              if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ]; then
+                BODY=$(cat /tmp/relay_resp.txt 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('message',''))" 2>/dev/null || echo "")
+                echo "  $TOKEN_VAR rejected: $BODY"
+                break
+              fi
+              sleep 3
+            done
+          done
+          echo "::warning::Relay failed — both LOOP_TRIGGER_TOKEN and GITHUB_TOKEN failed."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Monetag Android Result" >> $GITHUB_STEP_SUMMARY
+          if [ -f view_report.json ]; then
+            python3 - <<'PYEOF' >> $GITHUB_STEP_SUMMARY
+          import json
+          r = json.load(open("view_report.json"))
+          s = r["summary"]
+          print("### Verdict summary")
+          for k, v in s.items():
+              if ":" not in k:
+                  print(f"- {k}: {v}")
+          print(f"\nSmartLink: {r['smartlink_url']}")
+          print(f"Traffic source: {r['traffic_source']}")
+          print(f"Platform: android-emulator-real-chrome")
+          PYEOF
+          else
+            echo "No view report produced" >> $GITHUB_STEP_SUMMARY
+          fi
