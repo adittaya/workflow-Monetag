@@ -1,5 +1,46 @@
--- Monetag Proxy State — shared blacklist for used/dead proxies
--- Run this in Supabase SQL Editor to create the monetag_proxy_state table.
+-- Monetag Proxy System — run this in Supabase SQL Editor.
+
+-- ══════════════════════════════════════════════════════════════
+-- 1. proxy_results — the proxy pool
+--    The rotator queries rows where monetag_ok = true (premium tier),
+--    sorted by latency_ms, and DELETEs dead rows via the service key.
+-- ══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS proxy_results (
+  id BIGSERIAL PRIMARY KEY,
+  ip TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  proto TEXT DEFAULT 'http',
+  country TEXT,
+  latency_ms INTEGER DEFAULT 9999,
+  monetag_ok BOOLEAN NOT NULL DEFAULT false,
+  e2_ok BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (ip, port)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proxy_results_lookup
+  ON proxy_results (monetag_ok, latency_ms);
+
+-- RLS policies for proxy_results
+ALTER TABLE proxy_results ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "service_role_all_proxy_results" ON proxy_results;
+CREATE POLICY "service_role_all_proxy_results"
+  ON proxy_results FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "anon_read_proxy_results" ON proxy_results;
+CREATE POLICY "anon_read_proxy_results"
+  ON proxy_results FOR SELECT
+  TO anon
+  USING (true);
+
+-- ══════════════════════════════════════════════════════════════
+-- 2. monetag_proxy_state — shared blacklist for used/dead proxies
+-- ══════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS monetag_proxy_state (
   id BIGSERIAL PRIMARY KEY,
@@ -52,5 +93,13 @@ CREATE POLICY "anon_read_monetag_proxy_state"
   TO anon
   USING (true);
 
--- Ensure the proxy_results table has a monetag health-check column
-ALTER TABLE proxy_results ADD COLUMN IF NOT EXISTS monetag_ok BOOLEAN NOT NULL DEFAULT false;
+-- ══════════════════════════════════════════════════════════════
+-- 3. How to fill the pool — insert your proxy list here:
+-- ══════════════════════════════════════════════════════════════
+
+-- INSERT INTO proxy_results (ip, port, proto, country, latency_ms, monetag_ok, e2_ok) VALUES
+--   ('1.2.3.4', 8080, 'http', 'US', 150, true, true),
+--   ('5.6.7.8', 3128, 'http', 'DE', 200, true, false);
+
+-- Set a row's premium flag (or set e2_ok=true for the normal tier):
+-- UPDATE proxy_results SET monetag_ok = true WHERE ip = '1.2.3.4' AND port = 8080;
