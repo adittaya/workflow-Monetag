@@ -46,13 +46,14 @@ env:
   MONETAG_TRAFFIC_SOURCE: ${{ github.event.inputs.traffic_source || github.event.client_payload.traffic_source || 'youtube' }}
   MONETAG_REFERER: ${{ github.event.inputs.traffic_source_url || github.event.client_payload.traffic_source_url || secrets.MONETAG_REFERER || '' }}
   MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
-  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '2' }}
+  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '3' }}
+  MONETAG_ROTATE_MODE: 'fast'
   RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || '' }}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,7 +121,9 @@ jobs:
       - name: Get proxy
         id: proxy
         run: |
-          PROXY=$(python3 proxy_rotator.py premium | tail -1)
+          # Bounded to 90s so a slow pool can't stall the run (the engine's
+          # in-run rotation is already capped at MONETAG_PROXY_TIMEOUT=45s).
+          PROXY=$(timeout 90 python3 proxy_rotator.py premium | tail -1)
           echo "proxy=$PROXY" >> $GITHUB_OUTPUT
           echo "Got proxy: $PROXY"
 
@@ -130,12 +133,13 @@ jobs:
         env:
           CHROMIUM_PATH: /usr/bin/google-chrome
         run: |
-          # 2 views/run by default: the same working proxy serves both views,
-          # doubling impressions per run. Each view is capped at ~60s by the
-          # engine (MONETAG_HARD_TIMEOUT=60, watchdog-enforced), so a run is
-          # ~2 views x ~60s + overhead. ENGINE_TIMEOUT=135 fits 2 slow views.
+          # 3 views/run by default: each view = fresh browser + fresh proxy.
+          # The workflow's first proxy is browser-validated (Engine 2); the
+          # engine then rotates fast (TCP-alive, MONETAG_ROTATE_MODE=fast) so
+          # each cycle fits ~2 min (1 min proxy + 1 min browser, both capped).
+          # ENGINE_TIMEOUT=200 fits 3 x ~60s views + fast rotation + overhead.
           MAX_ATTEMPTS=2
-          ENGINE_TIMEOUT=135
+          ENGINE_TIMEOUT=200
           CURRENT_PROXY="${{ steps.proxy.outputs.proxy }}"
 
           get_verified() {

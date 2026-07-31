@@ -383,7 +383,11 @@ def test_proxy_selenium(proxy, timeout_s=60):
 import random
 
 
-def get_proxy(tier="premium"):
+def get_proxy(tier="premium", validate=None):
+    """Pick a proxy. `validate=None` honors MONETAG_VALIDATE_PROXIES;
+    True/False force/disable the Engine-2 browser validation (fast path)."""
+    if validate is None:
+        validate = os.environ.get("MONETAG_VALIDATE_PROXIES", "1") == "1"
     print("  [Proxy] Fetching proxies from Supabase (unlimited, batched)...", file=sys.stderr)
     all_proxies = fetch_proxies(tier, batch_size=500, max_batches=20)
     print(f"  [Proxy] Found {len(all_proxies)} {tier} proxies in DB (paginated)", file=sys.stderr)
@@ -438,7 +442,7 @@ def get_proxy(tier="premium"):
 
     alive.sort(key=lambda p: p.get("latency_ms", 9999))
 
-    if os.environ.get("MONETAG_VALIDATE_PROXIES", "1") == "1":
+    if validate:
         picked = _pick_browser_validated(alive)
         if picked is not None:
             return picked
@@ -487,7 +491,7 @@ def _pick_browser_validated(alive, top_n=5, max_workers=3):
 
 
 def get_proxy_quick(tier="premium"):
-    return get_proxy(tier)
+    return get_proxy(tier, validate=False)
 
 
 def get_public_ip(timeout_s=10):

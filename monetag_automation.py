@@ -37,6 +37,7 @@ Output:
 import json
 import os
 import random
+import queue
 import re
 import signal
 import sys
@@ -79,6 +80,9 @@ proxy_failures = 0
 proxy_blocked = False
 proxy_punished = False
 MAX_PROXY_RESTARTS = 3
+
+ROTATE_MODE = os.environ.get("MONETAG_ROTATE_MODE", "full").lower()
+PROXY_ROTATE_TIMEOUT = int(os.environ.get("MONETAG_PROXY_TIMEOUT", "45"))
 
 TRAFFIC_SOURCE = os.environ.get("MONETAG_TRAFFIC_SOURCE", "youtube").lower()
 TRAFFIC_REFERRERS = {
@@ -1918,19 +1922,47 @@ def main():
 
     for cycle in range(VIEWS_TOTAL):
         if cycle > 0:
-            # fresh proxy per cycle (rotate)
+            # Fresh proxy per view — bounded so a slow pool can't blow the
+            # ~2 min/cycle budget (1 min proxy + 1 min browser). Fast mode
+            # (CI) skips Engine-2 browser validation for in-run rotation;
+            # the workflow already browser-validated the first proxy.
             if PROXY:
                 log(f"--- rotating proxy for view {cycle + 1} ---")
                 if get_proxy:
+                    picked = None
+                    q = queue.Queue()
+
+                    def _rotate():
+                        try:
+                            q.put(get_proxy("premium", validate=(ROTATE_MODE != "fast")))
+                        except Exception as e:  # noqa: BLE001
+                            q.put(e)
+
+                    t = threading.Thread(target=_rotate, daemon=True)
+                    t.start()
                     try:
-                        picked = get_proxy("premium")
-                        if picked:
-                            os.environ["MONETAG_PROXY"] = f"http://{picked['ip']}:{picked['port']}"
-                            PROXY_IP = picked["ip"]
-                            PROXY_PORT = int(picked["port"])
-                            log(f"new proxy: {PROXY_IP}:{PROXY_PORT}")
+                        picked = q.get(timeout=PROXY_ROTATE_TIMEOUT)
+                        if isinstance(picked, Exception):
+                            raise picked
                     except Exception as e:
-                        log(f"proxy rotation failed: {e}")
+                        log(f"proxy rotation failed/timed out ({PROXY_ROTATE_TIMEOUT}s): {e}")
+                        picked = None
+
+                    if picked:
+                        os.environ["MONETAG_PROXY"] = f"http://{picked['ip']}:{picked['port']}"
+                        PROXY_IP = picked["ip"]
+                        PROXY_PORT = int(picked["port"])
+                        log(f"new proxy: {PROXY_IP}:{PROXY_PORT}")
+                    else:
+                        # Pool exhausted / rotation failed — do NOT reuse the
+                        # previous proxy (already marked used). Fail the view;
+                        # the relay retries with a fresh runner + fresh pool.
+                        log("proxy rotation produced no proxy — failing view (relay will retry)")
+                        print(f"VIEW {cycle + 1}: FAILED (no proxy)")
+                        worst = max(worst, 2)
+                        exit_codes.append(2)
+                        ms(2000)
+                        continue
         record, code = run_view_cycle(cycle)
         if record:
             records.append(record)
