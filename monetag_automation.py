@@ -1140,14 +1140,41 @@ def _create_driver():
     driver.execute_script(stealth_js)
 
 
+def _set_device_proxy():
+    """Android Chrome ignores --proxy-server (ERR_NO_SUPPORTED_PROXIES); the
+    proxy must be set device-wide. This routes ALL emulator network traffic
+    through the current MONETAG_PROXY, including Chrome."""
+    try:
+        subprocess.run(
+            ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
+             "http_proxy", f"{PROXY_IP}:{PROXY_PORT}"],
+            capture_output=True, timeout=15,
+        )
+        log(f"device proxy set: {PROXY_IP}:{PROXY_PORT}")
+    except Exception:
+        pass
+
+
+def _clear_device_proxy():
+    try:
+        subprocess.run(
+            ["adb", "-s", ANDROID_UDID, "shell", "settings", "put", "global",
+             "http_proxy", ":0"],
+            capture_output=True, timeout=15,
+        )
+    except Exception:
+        pass
+
+
 def _create_android_driver():
     """Create a WebDriver session against a booted Android emulator's REAL
     Chrome via Appium (UiAutomator2 + chromedriver). No UA/metrics/JS spoofing —
-    the device fingerprint is genuine. The current MONETAG_PROXY is bound with
-    --proxy-server so each view gets a fresh proxy while keeping the same
-    device identity. CDP-dependent helpers (_apply_cdp_profile, stealth,
-    referrer injection) are skipped: chromedriver-on-Android exposes a reduced
-    command surface and the whole point is NOT to emulate."""
+    the device fingerprint is genuine. The current MONETAG_PROXY is set as the
+    device-wide proxy (adb settings put global http_proxy) so each view gets a
+    fresh proxy while keeping the same device identity. CDP-dependent helpers
+    (_apply_cdp_profile, stealth, referrer injection) are skipped:
+    chromedriver-on-Android exposes a reduced command surface and the whole
+    point is NOT to emulate."""
     global driver, profile
     geo = _lookup_proxy_geo(PROXY_IP)
     profile = {
@@ -1172,7 +1199,7 @@ def _create_android_driver():
     options.set_capability("appium:adbExecTimeout", 120000)
 
     # Best-effort: kill any Chrome left over from the previous view so the new
-    # Appium session relaunches it cleanly with the new --proxy-server.
+    # Appium session relaunches it cleanly with the new device proxy.
     try:
         subprocess.run(
             ["adb", "-s", ANDROID_UDID, "shell", "am", "force-stop", "com.android.chrome"],
@@ -1180,6 +1207,11 @@ def _create_android_driver():
         )
     except Exception:
         pass
+
+    if PROXY_IP and PROXY_PORT:
+        _set_device_proxy()
+    else:
+        _clear_device_proxy()
 
     cd = os.environ.get("MONETAG_CHROMEDRIVER") or shutil.which("chromedriver")
     if cd:
@@ -1191,8 +1223,6 @@ def _create_android_driver():
         "--no-default-browser-check",
         "--disable-popup-blocking",
     ]
-    if PROXY:
-        goog_args.append(f"--proxy-server=http://{PROXY}")
     options.set_capability("goog:chromeOptions", {"args": goog_args})
     options.page_load_strategy = "none"
 

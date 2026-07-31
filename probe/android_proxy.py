@@ -10,7 +10,9 @@ Usage: MONETAG_PROXY=http://ip:port python3 probe/android_proxy.py
 """
 import glob
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -23,6 +25,20 @@ if not proxy:
 if not url:
     print("PROXY=SKIP no MONETAG_SMARTLINK_URL")
     sys.exit(0)
+
+m = re.match(r"https?://([^:]+):(\d+)", proxy)
+if not m:
+    print("PROXY=SKIP cannot parse MONETAG_PROXY:", proxy)
+    sys.exit(0)
+PHOST, PPORT = m.group(1), m.group(2)
+
+print("=== SET DEVICE-WIDE PROXY (adb settings put global http_proxy) ===")
+try:
+    subprocess.run(["adb", "shell", "settings", "put", "global", "http_proxy",
+                    f"{PHOST}:{PPORT}"], capture_output=True, timeout=15)
+    print(f"DEVICE_PROXY={PHOST}:{PPORT}")
+except Exception as e:
+    print("DEVICE_PROXY_FAIL:", repr(e))
 
 try:
     from selenium import webdriver
@@ -46,8 +62,7 @@ else:
     opts.set_capability("appium:chromedriverAutodownload", True)
 opts.add_argument("--disable-blink-features=AutomationControlled")
 opts.add_argument("--no-first-run")
-opts.add_argument(f"--proxy-server=http://{proxy}")
-print(f"PROXY_ARG=--proxy-server=http://{proxy}")
+print(f"DEVICE_PROXY_ARG={PHOST}:{PPORT} (device-wide via settings)")
 
 driver = None
 try:
@@ -116,3 +131,9 @@ finally:
             driver.quit()
         except Exception:
             pass
+    try:
+        subprocess.run(["adb", "shell", "settings", "put", "global", "http_proxy",
+                        ":0"], capture_output=True, timeout=15)
+        print("DEVICE_PROXY_CLEARED")
+    except Exception:
+        pass
