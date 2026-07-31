@@ -47,7 +47,7 @@ def run_engine(proxy):
         subprocess.run([
             sys.executable, "monetag_automation.py", SMARTLINK,
             "--views", VIEWS, "--verify-mode", VERIFY, "--traffic-source", TS,
-        ], timeout=300, check=False)
+        ], timeout=420, check=False)
     except subprocess.TimeoutExpired:
         print("ENGINE_TIMEOUT", flush=True)
     print(f"engine elapsed={time.time() - t0:.0f}s", flush=True)

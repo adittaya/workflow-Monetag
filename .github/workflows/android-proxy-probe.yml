@@ -70,7 +70,7 @@ jobs:
             sleep 20
 
             echo "=== PROXY + SMARTLINK PROBE (real Android Chrome) ==="
-            timeout 180 python3 probe/run_proxy_probe.py || true
+            timeout 300 python3 probe/run_proxy_probe.py || true
 
             echo "=== APPIUM LOG TAIL ==="
             tail -40 /tmp/appium.log || true

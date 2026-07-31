@@ -1208,11 +1208,6 @@ def _create_android_driver():
     except Exception:
         pass
 
-    if PROXY_IP and PROXY_PORT:
-        _set_device_proxy()
-    else:
-        _clear_device_proxy()
-
     cd = os.environ.get("MONETAG_CHROMEDRIVER") or shutil.which("chromedriver")
     if cd:
         options.set_capability("appium:chromedriverExecutable", cd)
@@ -1226,9 +1221,33 @@ def _create_android_driver():
     options.set_capability("goog:chromeOptions", {"args": goog_args})
     options.page_load_strategy = "none"
 
-    driver = webdriver.Remote(APPIUM_URL, options=options)
+    # Create the session BEFORE touching the device proxy: a proxy change while
+    # Appium is doing adbExec can momentarily take the device offline. Retry a
+    # few times — "adb: device offline" is usually transient.
+    driver = None
+    for attempt in range(1, 4):
+        try:
+            try:
+                subprocess.run(
+                    ["adb", "-s", ANDROID_UDID, "wait-for-device"],
+                    capture_output=True, timeout=30,
+                )
+            except Exception:
+                pass
+            driver = webdriver.Remote(APPIUM_URL, options=options)
+            break
+        except Exception:
+            if attempt == 3:
+                raise
+            log(f"appium session attempt {attempt} failed — retrying")
+            time.sleep(10)
     driver.set_page_load_timeout(30)
     driver.implicitly_wait(0)
+
+    if PROXY_IP and PROXY_PORT:
+        _set_device_proxy()
+    else:
+        _clear_device_proxy()
     log("android driver ready (Appium + real Chrome)")
 
 

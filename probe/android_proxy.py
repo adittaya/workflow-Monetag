@@ -32,13 +32,7 @@ if not m:
     sys.exit(0)
 PHOST, PPORT = m.group(1), m.group(2)
 
-print("=== SET DEVICE-WIDE PROXY (adb settings put global http_proxy) ===")
-try:
-    subprocess.run(["adb", "shell", "settings", "put", "global", "http_proxy",
-                    f"{PHOST}:{PPORT}"], capture_output=True, timeout=15)
-    print(f"DEVICE_PROXY={PHOST}:{PPORT}")
-except Exception as e:
-    print("DEVICE_PROXY_FAIL:", repr(e))
+print("=== SET DEVICE-WIDE PROXY (after session, via adb settings) ===")
 
 try:
     from selenium import webdriver
@@ -62,12 +56,35 @@ else:
     opts.set_capability("appium:chromedriverAutodownload", True)
 opts.add_argument("--disable-blink-features=AutomationControlled")
 opts.add_argument("--no-first-run")
-print(f"DEVICE_PROXY_ARG={PHOST}:{PPORT} (device-wide via settings)")
+print(f"DEVICE_PROXY_TARGET={PHOST}:{PPORT} (device-wide via settings after session)")
 
 driver = None
 try:
-    driver = webdriver.Remote(command_executor="http://127.0.0.1:4723", options=opts)
+    # Create the session first; a proxy change mid-adbExec can take the device
+    # offline. Retry a couple times ("adb: device offline" is usually transient).
+    last = None
+    for attempt in range(1, 4):
+        try:
+            subprocess.run(["adb", "wait-for-device"], capture_output=True, timeout=30)
+            driver = webdriver.Remote(command_executor="http://127.0.0.1:4723", options=opts)
+            break
+        except Exception as e:
+            last = e
+            print(f"SESSION_ATTEMPT_{attempt}_FAIL", repr(e))
+            time.sleep(10)
+    if driver is None:
+        raise last
+
     print("PROXY=connected")
+
+    print("=== SET DEVICE-WIDE PROXY (adb settings put global http_proxy) ===")
+    try:
+        subprocess.run(["adb", "shell", "settings", "put", "global", "http_proxy",
+                        f"{PHOST}:{PPORT}"], capture_output=True, timeout=15)
+        print(f"DEVICE_PROXY={PHOST}:{PPORT}")
+    except Exception as e:
+        print("DEVICE_PROXY_FAIL:", repr(e))
+    time.sleep(3)
 
     def body_ip():
         try:

@@ -136,7 +136,7 @@ jobs:
             sleep 20
 
             echo "=== RUN ANDROID ENGINE (real Chrome + Supabase proxies) ==="
-            timeout 600 python3 probe/run_engine_android.py 2>&1 || true
+            timeout 700 python3 probe/run_engine_android.py 2>&1 || true
 
             echo "=== APPIUM LOG TAIL ==="
             tail -40 /tmp/appium.log || true
