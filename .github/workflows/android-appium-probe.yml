@@ -1,0 +1,86 @@
+name: Android Appium Probe (drive real Chrome via Selenium)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  appium:
+    # Same emulator recipe that proved KVM boot + real Chrome (probe #10).
+    # This probe's only job: prove selenium webdriver.Remote -> Appium ->
+    # emulator real Chrome -> load URL -> read UA. If this works, the
+    # monetag engine can drive real Android Chrome with minimal changes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MONETAG_SMARTLINK_URL: ${{ secrets.MONETAG_SMARTLINK_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare KVM + audio libs
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpulse0
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+
+      - name: Boot emulator + run Appium drive probe
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          disable-linux-hw-accel: false
+          emulator-options: -accel on -no-window
+          script: |
+            set -e
+            mkdir -p evidence
+
+            echo "=== PREP (root + FRE skip + reverse) ==="
+            adb root
+            sleep 2
+            adb wait-for-device
+            adb shell 'echo "_ --disable-fre --no-first-run --disable-sync" > /data/local/tmp/chrome-command-line'
+            adb shell chmod 644 /data/local/tmp/chrome-command-line
+            adb shell am force-stop com.android.chrome
+            adb reverse tcp:8888 tcp:8888
+
+            echo "=== NODE / NPM ==="
+            node --version
+            npm --version
+
+            echo "=== INSTALL APPIUM + UIAUTOMATOR2 DRIVER ==="
+            sudo npm install -g appium@2 --no-fund --no-audit
+            appium --version
+            appium driver install uiautomator2
+
+            echo "=== INSTALL SELENIUM (python) ==="
+            python3 -m pip install --user --quiet selenium
+
+            echo "=== START APPIUM ==="
+            nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &
+            sleep 20
+
+            echo "=== DRIVE PROBE (selenium -> appium -> chrome) ==="
+            python3 probe/appium_drive.py || true
+
+            echo "=== APPIUM LOG TAIL ==="
+            tail -80 /tmp/appium.log || true
+
+            echo "=== SMARTLINK VIA APPIUM (real chrome + no proxy yet) ==="
+            python3 probe/appium_smartlink.py || true
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-appium-evidence
+          path: evidence/
+          if-no-files-found: warn
