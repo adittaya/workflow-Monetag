@@ -246,17 +246,30 @@ def test_proxy_selenium(proxy, timeout_s=60):
             driver.get(test_target)
         except Exception:
             pass
-        time.sleep(1)
 
+        # A proxy is "good" when a real browser through it can reach the
+        # offer: either the URL leaves the smartlink domain, or the page
+        # actually rendered real content (inline offers stay on the domain).
         left_smartlink = False
+        good_page = False
         final_url = ""
-        for _ in range(20):
+        for _ in range(15):
             time.sleep(1)
-            final_url = driver.current_url
+            try:
+                final_url = driver.current_url
+            except Exception:
+                break
             if "chrome-error" in final_url or "about:blank" in final_url or final_url.startswith("data:"):
                 break
             if smartlink and "oclasrv.com" not in final_url and "monetag.com" not in final_url and "omg10.com" not in final_url:
                 left_smartlink = True
+                break
+            try:
+                body = driver.find_element("tag name", "body").text or ""
+            except Exception:
+                body = ""
+            if len(body) > 400:
+                good_page = True
                 break
 
         is_good = bool(
@@ -264,7 +277,7 @@ def test_proxy_selenium(proxy, timeout_s=60):
             and "chrome-error" not in final_url
             and "about:blank" not in final_url
             and not final_url.startswith("data:")
-            and (left_smartlink or not smartlink)
+            and (left_smartlink or good_page or not smartlink)
         )
         total_ms = int((time.time() - start) * 1000)
         driver.quit()
@@ -333,8 +346,52 @@ def get_proxy(tier="premium"):
         return None
 
     alive.sort(key=lambda p: p.get("latency_ms", 9999))
+
+    if os.environ.get("MONETAG_VALIDATE_PROXIES", "1") == "1":
+        picked = _pick_browser_validated(alive)
+        if picked is not None:
+            return picked
+        print("  [Proxy] No proxy passed browser validation; falling back to fastest TCP-alive (views may not count)", file=sys.stderr)
+
     picked = alive[0]
     print(f"  [Proxy] Selected: {picked['ip']}:{picked['port']} ({picked.get('latency_ms', '?')}ms) [{len(alive)} alive, {len(dead)} deleted]", file=sys.stderr)
+    return picked
+
+
+def _pick_browser_validated(alive, top_n=5, max_workers=3):
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+    try:
+        top_n = int(os.environ.get("MONETAG_VALIDATE_TOP", str(top_n)))
+    except Exception:
+        pass
+    try:
+        max_workers = int(os.environ.get("MONETAG_VALIDATE_WORKERS", str(max_workers)))
+    except Exception:
+        pass
+    top = alive[:top_n]
+    print(f"  [Proxy] Browser-validating top {len(top)} proxies through smartlink (parallel)", file=sys.stderr)
+    validated = []
+    with _TPE(max_workers=min(len(top), max_workers)) as pool:
+        futures = {pool.submit(test_proxy_selenium, p, 30): p for p in top}
+        for f in _ac(futures):
+            p = futures[f]
+            try:
+                r = f.result()
+                if r.get("ok"):
+                    validated.append({**p, "latency_ms": r.get("latency_ms", p.get("latency_ms", 9999))})
+                    print(f"  [Proxy] OK: {p['ip']}:{p['port']} -> {r.get('finalUrl', '')}", file=sys.stderr)
+                else:
+                    print(f"  [Proxy] FAIL: {p['ip']}:{p['port']} -> {r.get('finalUrl', '')}", file=sys.stderr)
+            except Exception as e:
+                print(f"  [Proxy] ERR: {p['ip']}:{p['port']} ({e})", file=sys.stderr)
+
+    if not validated:
+        return None
+
+    validated.sort(key=lambda p: p.get("latency_ms", 9999))
+    picked = validated[0]
+    print(f"  [Proxy] Browser-validated {len(validated)}/{len(top)}; selected {picked['ip']}:{picked['port']} ({picked.get('latency_ms', '?')}ms)", file=sys.stderr)
     return picked
 
 

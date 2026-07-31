@@ -8,7 +8,7 @@
 ## Current State
 
 - **Last updated:** 2026-07-31
-- **Local codebase status:** REBRAND COMPLETE + PRODUCTION-TESTED — 6 commits pushed to `adittaya/workflow-Monetag` (main); runs #2/#4 SUCCESS, #3 failure fixed (watchdog)
+- **Local codebase status:** REBRAND COMPLETE + PRODUCTION-TESTED — 8 commits pushed to `adittaya/workflow-Monetag` (main); runs #2/#4 SUCCESS, #3 failure fixed (watchdog), #5-#6 loop live, Engine-2 proxy validation shipped
 - **Project:** VPLink relay system fully cut out → **Monetag SmartLink automation system**
 - **New engine:** `monetag_automation.py` (1752 lines) — SmartLink view engine with multi-signal view verification
 - **Old engine:** `automation.py` DELETED (VPLink funnel engine removed)
@@ -130,6 +130,10 @@
 - [x] Artifact recovery: `run_config.json` + `view_report.json` uploaded as `run-config` artifact (not secret-masked); `_NoAuthRedirect` strips Authorization on Azure redirect (fixes 403); hardened `parse_run_log_config`; `extract_destination` prefers artifact final_url — `4885475` + `3080a37`
 - [x] Production re-test run #4 SUCCESS ~2min (automation 17s, inline offer VIEW_LIKELY 71); recovery validated end-to-end from run #4 artifact
 - [x] Relay 24/7 loop: `RELAY_TARGET_REPO` defaults to empty (skip relay + warning) so the official repo can't self-loop; TUI `deploy_new` sets it to the deployed repo itself → continuous back-to-back self-loop (24/7). Self-target guard approach reverted — `f4c0789`
+- [x] **Proxy-only views** (`87bdf12`): direct (datacenter runner IP) removed — advertisers don't count it. Attempt 2 rotates a fresh `proxy_rotator.py premium` proxy; no proxy → `::warning::` + skip attempt (relay retries next run).
+- [x] **Engine 2 in `get_proxy()`** (proxy browser validation): after the TCP pass, the top `MONETAG_VALIDATE_TOP` (default 5) fastest alive proxies are browser-validated in parallel (`MONETAG_VALIDATE_WORKERS`, default 3) via `test_proxy_selenium` against the real `MONETAG_SMARTLINK_URL`; first passing proxy wins. Validation passes if the URL leaves the smartlink domain OR the page rendered real content (`good_page`, body > 400 chars) — inline offers (run #4 `omg10.com/afu.php`) no longer false-negative. Fallback: fastest TCP-alive with a loud warning (`MONETAG_VALIDATE_PROXIES=0` disables). Smartlink runs in the workflow are already browser-validated through the same chain.
+- [x] Live 24/7 self-loop on official repo: `RELAY_TARGET_REPO` secret set to `adittaya/workflow-Monetag`; runs #5 FAILURE (old workflow), #6 SUCCESS but **`verified_or_likely=0`** (watchdog 68.4s force-quit), #7 in_progress. 0-verified run is why Engine-2 proxy validation was added — TCP-alive ≠ proxy that can deliver a countable view.
+- [x] VPLink reference (`workflow-vplink/proxy_rotator.py`): same architecture (Engine 1 TCP + Engine 2 Selenium), `TEST_URL=vplink.in/gbd1b` + `/proxy_state`; Monetag version uses `monetag.com` + `/monetag_proxy_state`. Key gap was that Selenium validation only ran in manual `--test` mode, never in `get_proxy()` — now fixed above.
 
 ---
 
@@ -153,4 +157,4 @@
 - 2026-07-31 watchdog fix: `start_cycle_watchdog()` — daemon thread force-quits the driver at `cycle_deadline+8s` so a blocking WebDriver call (hung renderer over proxy) can't exceed the 60s per-view budget; cycle then wraps up as invalid view; healthy local test unaffected (**VIEW_VERIFIED 92 in 42s**)
 - 2026-07-31 workflow timing: automate step `timeout-minutes` 2→3 (2 attempts × ≤70s + overhead fit; success ~65s, job total ~2-3min); ENGINE_TIMEOUT stays 90
 - 2026-07-31 **artifact config recovery**: workflow writes `run_config.json` (real values — files aren't secret-masked) + uploads `run-config` artifact (with `view_report.json`, 30d retention, `if: always()`); `tui.py` `download_run_artifact()` (uses `_NoAuthRedirect` — artifact zips redirect to Azure blob storage and urllib must strip the GitHub `Authorization` header or it 403s) → `recover_deployment_config()` reads artifacts first, then inputs (API returns null for workflow_dispatch), then hardened log parser (validates enums/digits/http so echoed bash lines aren't picked up; GH masks secrets as `***` in logs so artifact is the only reliable source); `extract_destination()` now prefers artifact `view_report.json` `views[].final_url`. Commit `3080a37`
-- REPO COMMITS: `48456bd` device emulation + IP-geo + TUI dispatch, `469d31e` TUI grouped menu + Doctor + new-device recovery, `a491b55` workflow 2-min cap (verdict-based retry), `4885475` run-config artifact, `9567ced` watchdog + 3min step, `3080a37` artifact redirect fix + log parser hardening
+- REPO COMMITS: `48456bd` device emulation + IP-geo + TUI dispatch, `469d31e` TUI grouped menu + Doctor + new-device recovery, `a491b55` workflow 2-min cap (verdict-based retry), `4885475` run-config artifact, `9567ced` watchdog + 3min step, `3080a37` artifact redirect fix + log parser hardening, `f4c0789` relay default-empty 24/7 loop, `87bdf12` proxy-only views, `<new>` Engine-2 browser validation in `get_proxy()`
