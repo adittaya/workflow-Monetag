@@ -24,7 +24,7 @@ on:
       views:
         description: 'Number of view cycles to run'
         required: false
-        default: '1'
+        default: '2'
       no_relay:
         description: 'Set to "1" to skip the relay (test mode)'
         required: false
@@ -46,7 +46,7 @@ env:
   MONETAG_TRAFFIC_SOURCE: ${{ github.event.inputs.traffic_source || github.event.client_payload.traffic_source || 'youtube' }}
   MONETAG_REFERER: ${{ github.event.inputs.traffic_source_url || github.event.client_payload.traffic_source_url || secrets.MONETAG_REFERER || '' }}
   MONETAG_VERIFY_MODE: ${{ github.event.inputs.verify_mode || github.event.client_payload.verify_mode || 'strict' }}
-  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '1' }}
+  MONETAG_VIEWS: ${{ github.event.inputs.views || github.event.client_payload.views || '2' }}
   RELAY_TARGET_REPO: ${{ secrets.RELAY_TARGET_REPO || '' }}
 
 jobs:
@@ -126,15 +126,16 @@ jobs:
 
       - name: Run automation (with proxy retry)
         id: automate
-        timeout-minutes: 3
+        timeout-minutes: 5
         env:
           CHROMIUM_PATH: /usr/bin/google-chrome
         run: |
-          # Each view is capped at ~60s by the engine (MONETAG_HARD_TIMEOUT=60,
-          # watchdog-enforced), so a successful run finishes in ~65s. On failure
-          # 2 attempts fit here: 2 x ~70s + overhead. Total job stays ~3min.
+          # 2 views/run by default: the same working proxy serves both views,
+          # doubling impressions per run. Each view is capped at ~60s by the
+          # engine (MONETAG_HARD_TIMEOUT=60, watchdog-enforced), so a run is
+          # ~2 views x ~60s + overhead. ENGINE_TIMEOUT=135 fits 2 slow views.
           MAX_ATTEMPTS=2
-          ENGINE_TIMEOUT=90
+          ENGINE_TIMEOUT=135
           CURRENT_PROXY="${{ steps.proxy.outputs.proxy }}"
 
           get_verified() {

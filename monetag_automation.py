@@ -607,9 +607,20 @@ def bezier_move(from_x, from_y, to_x, to_y):
         pass
 
 
-def random_click():
-    """Click a random visible interactive element (link/button) like a human."""
+def random_click(allow_cross=False):
+    """Click a random visible interactive element (link/button) like a human.
+    With allow_cross=True, also clicks links that point off the current domain."""
     try:
+        same_domain_js = """
+                    if (e.tagName === 'A') {
+                        if (!e.href || e.href.indexOf('javascript:') === 0) return false;
+                        try {
+                            var u = new URL(e.href, location.href);
+                            var rd = function(h) { var p = h.split('.'); return p.length > 2 ? p.slice(-2).join('.') : h; };
+                            if (rd(u.hostname) !== rd(location.hostname)) return false;
+                        } catch (err) { return false; }
+                    }
+"""
         cds = safe_eval(r"""
             var els = Array.from(document.querySelectorAll(
                 'a, button, [role="button"], input[type="submit"], .btn, [onclick]'))
@@ -619,14 +630,7 @@ def random_click():
                     if (r.top < -20 || r.bottom > window.innerHeight + 20) return false;
                     var s = getComputedStyle(e);
                     if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') return false;
-                    if (e.tagName === 'A') {
-                        if (!e.href || e.href.indexOf('javascript:') === 0) return false;
-                        try {
-                            var u = new URL(e.href, location.href);
-                            var rd = function(h) { var p = h.split('.'); return p.length > 2 ? p.slice(-2).join('.') : h; };
-                            if (rd(u.hostname) !== rd(location.hostname)) return false;
-                        } catch (err) { return false; }
-                    }
+""" + ("" if allow_cross else same_domain_js) + r"""
                     return true;
                 })
                 .map(function(e) {
@@ -1038,6 +1042,10 @@ def _create_driver():
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    # "none" load strategy: clicks/execute_script never block on a pending
+    # navigation (smartlink pages navigate mid-interaction). The engine polls
+    # URLs itself, so navigation state is tracked explicitly.
+    options.page_load_strategy = "none"
 
     chromedriver_paths = [
         "/usr/bin/chromedriver",
@@ -1351,6 +1359,149 @@ def scan_tabs_for_view():
 
 
 # ══════════════════════════════════════════════════════════════
+#  Adaptive page engagement — tap buttons, chase tabs, scroll
+# ══════════════════════════════════════════════════════════════
+
+INTERSTITIAL_EXACT = ("continue", "allow", "ok", "open", "start", "play", "watch",
+                      "yes", "submit", "skip", "dismiss", "close", "got it", "accept",
+                      "enable", "agree", "proceed", "next", "enter", "visit", "understand",
+                      "x", "×", "no thanks", "let's go", "let’s go")
+INTERSTITIAL_SUBSTR = ("continue", "allow", "accept", "got it", "open", "start", "play",
+                       "watch", "enable", "proceed", "submit", "agree", "visit", "enter",
+                       "next", "ok", "yes", "dismiss", "skip", "close", "no thanks",
+                       "let's go", "let’s go", "admit", "understand", "click to")
+
+
+def _visible_clickables(max_n=80):
+    """Return visible interactive elements: {tag, text, x, y, w, same}."""
+    cds = safe_eval(r"""
+        var out = [];
+        var els = document.querySelectorAll(
+            'a, button, [role="button"], input[type="button"], input[type="submit"], ' +
+            '.btn, .button, .cta, [onclick], [class*="close"], [class*="continue"], [class*="allow"]');
+        for (var i = 0; i < els.length && out.length < __MAXN__; i++) {
+            var e = els[i];
+            var r = e.getBoundingClientRect();
+            if (!r || r.width < 5 || r.height < 5) continue;
+            if (r.top < -20 || r.bottom > window.innerHeight + 20) continue;
+            var s = getComputedStyle(e);
+            if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') continue;
+            var same = true;
+            if (e.tagName === 'A' && e.href) {
+                try {
+                    var u = new URL(e.href, location.href);
+                    var rd = function(h) { var p = h.split('.'); return p.length > 2 ? p.slice(-2).join('.') : h; };
+                    same = rd(u.hostname) === rd(location.hostname);
+                } catch (err) { same = true; }
+            }
+            out.push({tag: e.tagName,
+                      text: (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().slice(0, 50),
+                      x: Math.round(r.left + r.width / 2),
+                      y: Math.round(r.top + r.height / 2),
+                      w: Math.round(r.width),
+                      same: same});
+        }
+        return JSON.stringify(out);
+    """.replace("__MAXN__", str(max_n)))
+    try:
+        return json.loads(cds or "[]")
+    except Exception:
+        return []
+
+
+def _click_at(x, y):
+    try:
+        human_delay(300, 800)
+        bezier_move(0, 0, int(x), int(y))
+        human_delay(100, 350)
+        ActionChains(driver).click().perform()
+        return True
+    except Exception:
+        return False
+
+
+def _click_interstitial():
+    """Tap a Continue/Allow/OK/Open-style CTA or dismiss button. Returns True if tapped."""
+    els = _visible_clickables()
+    if not els:
+        return False
+    low = [e for e in els if e["text"].lower() in INTERSTITIAL_EXACT]
+    if low:
+        el = random.choice(low)
+    else:
+        hits = [e for e in els if e["text"].lower() and
+                any(k in e["text"].lower() for k in INTERSTITIAL_SUBSTR)]
+        if not hits:
+            return False
+        hits.sort(key=lambda e: (e["w"], not e["same"]))
+        el = hits[0]
+    if _click_at(el["x"], el["y"]):
+        log(f"interstitial tap: '{el['text']}' ({el['tag']}) @({el['x']},{el['y']})")
+        return True
+    return False
+
+
+def _switch_to_best_tab():
+    """Switch to the most content-rich non-ad tab (popunder offer tab)."""
+    url, h = scan_tabs_for_view()
+    if h:
+        try:
+            if driver.current_window_handle != h:
+                driver.switch_to.window(h)
+                log(f"chased tab: {(url or '')[:100]}")
+            return url
+        except Exception:
+            return None
+    return None
+
+
+def engage_with_page(duration_sec, known_height=0):
+    """Adaptively interact with whatever the SmartLink served: tap CTA buttons,
+    chase popunder/offer tabs, scroll, click real elements — so the automation
+    follows random ads/offers instead of passively waiting. Returns the best
+    landing URL + handle found."""
+    dur = min(duration_sec or 20, 60)
+    start = time.time()
+    last_tab_check = 0.0
+    best_url = safe_url()
+    best_handle = None
+    navigated = False
+    while time.time() - start < dur:
+        # leave enough time for verify (watchdog protects hard hangs)
+        if time.time() - start >= dur - 6:
+            break
+        # 1. Chase any newly-opened content tab (popunder offer)
+        if time.time() - last_tab_check > 4:
+            url = _switch_to_best_tab()
+            if url and url != "about:blank":
+                best_url = url
+                try:
+                    best_handle = driver.current_window_handle
+                except Exception:
+                    pass
+            last_tab_check = time.time()
+            navigated = False
+        if safe_url() != best_url:
+            best_url = safe_url()
+            navigated = False
+        # 2. Page changed? tap a CTA / dismiss interstitial
+        if not navigated and _click_interstitial():
+            navigated = True
+            ms(rand(800, 2000))
+            continue
+        # 3. Scroll + random click on real elements
+        if random.random() < 0.5:
+            random_click(allow_cross=(random.random() < 0.15))
+            ms(rand(900, 2200))
+        else:
+            human_scroll()
+            ms(rand(1200, 2800))
+        if safe_url() != best_url:
+            best_url = safe_url()
+    return best_url, best_handle
+
+
+# ══════════════════════════════════════════════════════════════
 #  View verification — multi-signal scoring
 # ══════════════════════════════════════════════════════════════
 
@@ -1544,8 +1695,17 @@ def run_view_cycle(cycle_idx):
     human_delay(1500, 3000)
     debug_shot(f"view{cycle_idx + 1}-start")
 
-    # Wait for first real page (redirect may start immediately)
+    # page_load_strategy=none → driver.get returns immediately; poll until the
+    # smartlink navigation actually starts (redirect may kick in right away)
+    nav_wait = time.time()
     first_url = safe_url()
+    while time.time() - nav_wait < 12:
+        if first_url and first_url != "about:blank" and not first_url.startswith("chrome-error://"):
+            break
+        ms(500)
+        first_url = safe_url()
+
+    # Wait for first real page (redirect may start immediately)
     if not first_url or first_url == "about:blank" or first_url.startswith("chrome-error://"):
         log(f"no usable page after smartlink nav: {first_url or 'blank'}")
         report_proxy_failure("smartlink-nav-empty")
@@ -1577,16 +1737,27 @@ def run_view_cycle(cycle_idx):
     except Exception:
         pass
 
-    # Dwell — human-like reading + random clicks on the landing page, capped
-    # so the whole cycle fits the 60s budget (chain may already have used some;
-    # ~8s margin left for human_scroll + verify).
+    # Dwell — adaptive engagement: tap CTA/interstitial buttons, chase offer
+    # tabs, scroll, click real elements (SmartLink serves random ads/offers
+    # that only resolve with real interaction). Capped to fit the cycle budget.
     dwell_secs = rand(10, 25)
     remaining = cycle_deadline - time.time()
     dwell_secs = max(1, min(dwell_secs, int(remaining) - 8))
     snap = monitor.snapshot()
     known_height = snap.get("height", 0)
-    human_read(duration_sec=dwell_secs, known_height=known_height)
-    human_scroll()
+    engaged_url, engaged_handle = engage_with_page(dwell_secs, known_height)
+    if engaged_handle:
+        landing_url = engaged_url or landing_url
+        try:
+            driver.switch_to.window(engaged_handle)
+        except Exception:
+            pass
+    # Re-install PageMonitor on the final landing document
+    try:
+        monitor.install(driver)
+        ms(1200)
+    except Exception:
+        pass
 
     # Verify
     record, score, verdict = verify_view(chain_info, landing_url, dwell_secs)

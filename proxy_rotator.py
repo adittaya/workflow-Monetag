@@ -160,6 +160,85 @@ def mark_proxy_used(ip, port):
 
 
 # ══════════════════════════════════════════════════════════════
+#  Geo targeting — Monetag zones count impressions only for the
+#  targeted country, so the pool must be restricted to that geo.
+# ══════════════════════════════════════════════════════════════
+
+def _target_geo():
+    geo = os.environ.get("MONETAG_TARGET_GEO", "")
+    if not geo:
+        try:
+            geo = (config.load() or {}).get("target_geo", "")
+        except Exception:
+            pass
+    return (geo or "").strip().upper()
+
+
+def resolve_proxy_country(ip, timeout_s=8):
+    """Best-effort country code for an IP."""
+    for host in (f"http://ipwho.is/{ip}", f"http://ip-api.com/json/{ip}"):
+        try:
+            r = req_lib.get(host, timeout=timeout_s)
+            d = r.json()
+            cc = d.get("country_code") or d.get("countryCode") or ""
+            if cc:
+                return cc.upper()
+        except Exception:
+            continue
+    return ""
+
+
+def add_proxy(ip, port, proto="http", country="", latency_ms=9999, ok=True):
+    """Insert a proxy into the pool (monetag_ok/e2_ok = ok)."""
+    if not country:
+        country = resolve_proxy_country(ip)
+    data = {
+        "ip": ip,
+        "port": int(port),
+        "proto": proto,
+        "country": country.upper(),
+        "latency_ms": int(latency_ms),
+        "monetag_ok": ok,
+        "e2_ok": ok,
+    }
+    resp = supabase_fetch("/proxy_results", method="POST", data=data)
+    if resp.ok:
+        print(f"  [Proxy] Added {ip}:{port} ({country or 'geo?'})", file=sys.stderr)
+    else:
+        print(f"  [Proxy] Add failed for {ip}:{port}: HTTP {resp.status_code}", file=sys.stderr)
+    return resp.ok
+
+
+def update_proxy_country(ip, port, country):
+    try:
+        resp = supabase_fetch(
+            f"/proxy_results?ip=eq.{ip}&port=eq.{port}",
+            method="PATCH",
+            data={"country": country.upper()},
+        )
+        return resp.ok
+    except Exception:
+        return False
+
+
+def sync_proxy_geo(batch_size=200, max_batches=20):
+    """Tag any proxies without a country code so geo selection works."""
+    all_proxies = fetch_proxies("premium", batch_size=batch_size, max_batches=max_batches)
+    untagged = [p for p in all_proxies if not (p.get("country") or "").strip()]
+    print(f"  [Proxy] {len(all_proxies)} in pool, {len(untagged)} without country", file=sys.stderr)
+    if not untagged:
+        return 0
+    fixed = 0
+    for p in untagged:
+        cc = resolve_proxy_country(p["ip"])
+        if cc and update_proxy_country(p["ip"], p["port"], cc):
+            fixed += 1
+        time.sleep(0.05)
+    print(f"  [Proxy] Tagged {fixed}/{len(untagged)} with country", file=sys.stderr)
+    return fixed
+
+
+# ══════════════════════════════════════════════════════════════
 #  TCP-level tests (fast, parallel, Engine 1)
 # ══════════════════════════════════════════════════════════════
 
@@ -202,7 +281,10 @@ def test_proxy_selenium(proxy, timeout_s=60):
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
 
-    proxy_url = f"http://{proxy['ip']}:{proxy['port']}"
+    if proxy.get("username"):
+        proxy_url = f"http://{proxy['username']}:{proxy.get('password', '')}@{proxy['ip']}:{proxy['port']}"
+    else:
+        proxy_url = f"http://{proxy['ip']}:{proxy['port']}"
     start = time.time()
     driver = None
     try:
@@ -307,6 +389,15 @@ def get_proxy(tier="premium"):
     print(f"  [Proxy] Found {len(all_proxies)} {tier} proxies in DB (paginated)", file=sys.stderr)
     if not all_proxies:
         return None
+
+    geo = _target_geo()
+    if geo:
+        geo_proxies = [p for p in all_proxies if (p.get("country") or "").strip().upper() == geo]
+        print(f"  [Proxy] Target geo {geo}: {len(geo_proxies)}/{len(all_proxies)} proxies match", file=sys.stderr)
+        if not geo_proxies:
+            print(f"  [Proxy] ERROR: no {geo} proxies in pool — add {geo} proxies or clear MONETAG_TARGET_GEO", file=sys.stderr)
+            return None
+        all_proxies = geo_proxies
 
     print("  [Proxy] Checking used state (Supabase)...", file=sys.stderr)
     used_keys = _fetch_used_keys()
@@ -711,6 +802,30 @@ if __name__ == "__main__":
         ok = verify_proxy_ip(proxy)
         sys.exit(0 if ok else 1)
 
+    if "--sync-geo" in sys.argv:
+        sync_proxy_geo()
+        sys.exit(0)
+
+    if "--import" in sys.argv:
+        idx = sys.argv.index("--import")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: --import ip:port[:proto] ip:port ...", file=sys.stderr)
+            sys.exit(1)
+        n_added = 0
+        for raw in sys.argv[idx + 1:]:
+            try:
+                if raw.count(":") == 1:
+                    ip, port = raw.split(":", 1)
+                    proto = "http"
+                else:
+                    ip, port, proto = raw.rsplit(":", 2)
+                if add_proxy(ip.strip(), int(port), proto):
+                    n_added += 1
+            except Exception as e:
+                print(f"  [Proxy] skip {raw}: {e}", file=sys.stderr)
+        print(f"  [Proxy] Imported {n_added} proxies", file=sys.stderr)
+        sys.exit(0 if n_added else 1)
+
     if "--help" in sys.argv or "-h" in sys.argv:
         print("Monetag Proxy Rotator")
         print()
@@ -720,7 +835,10 @@ if __name__ == "__main__":
         print("  python3 proxy_rotator.py --quick [tier]   Get one proxy (stdout)")
         print("  python3 proxy_rotator.py [tier]          Get proxy (verbose)")
         print("  python3 proxy_rotator.py --test ip:port  Test specific proxy")
+        print("  python3 proxy_rotator.py --import ip:port ...   Add proxies to pool")
+        print("  python3 proxy_rotator.py --sync-geo      Tag untagged proxies with country")
         print()
+        print("Geo targeting: set MONETAG_TARGET_GEO (e.g. IN) or config target_geo")
         print("Tiers: premium (default), normal")
         print("Config: ~/.config/monetag/config.json")
         sys.exit(0)

@@ -30,6 +30,7 @@ DEFAULTS = {
     "random_urls": [],
     "vnc_port": 5900,
     "views": 1,
+    "target_geo": "",
 }
 
 
