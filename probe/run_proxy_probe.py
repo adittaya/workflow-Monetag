@@ -10,7 +10,9 @@ import os
 import subprocess
 import sys
 
-from proxy_rotator import get_proxy
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from proxy_rotator import get_proxy  # noqa: E402
 
 
 def main():
