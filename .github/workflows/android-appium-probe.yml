@@ -57,7 +57,7 @@ jobs:
             npm --version
 
             echo "=== INSTALL APPIUM + UIAUTOMATOR2 DRIVER ==="
-            sudo npm install -g appium@2 --no-fund --no-audit
+            sudo npm install -g appium@3 --no-fund --no-audit
             appium --version
             appium driver install uiautomator2
 
