@@ -24,7 +24,7 @@ on:
       views:
         description: 'Number of view cycles to run'
         required: false
-        default: '2'
+        default: '3'
       no_relay:
         description: 'Set to "1" to skip the relay (test mode)'
         required: false
