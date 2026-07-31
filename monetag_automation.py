@@ -1447,6 +1447,23 @@ def _create_android_driver():
     driver.set_page_load_timeout(30)
     driver.implicitly_wait(0)
 
+    # Populate the profile keys the record/verify path expects from the REAL
+    # device (genuine fingerprint — no spoofing).
+    try:
+        profile["userAgent"] = driver.execute_script("return navigator.userAgent;") or ""
+    except Exception:
+        profile["userAgent"] = ""
+    profile["platform"] = "Android"
+    profile["languages"] = profile.get("languages") or ["en-US", "en"]
+    try:
+        ws = driver.get_window_size()
+        profile["viewport"] = {"width": int(ws["width"]), "height": int(ws["height"])}
+    except Exception:
+        profile["viewport"] = {"width": 1080, "height": 2400}
+    profile["screen"] = dict(profile["viewport"])
+    profile["deviceScaleFactor"] = 3.0
+    profile["geo"] = ""
+
     if PROXY_IP and PROXY_PORT:
         _set_device_proxy()
     else:
