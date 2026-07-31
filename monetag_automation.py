@@ -40,6 +40,7 @@ import random
 import re
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1497,6 +1498,26 @@ def verify_view(chain_info, landing_url, dwell_secs):
 #  View cycle — one full SmartLink visit
 # ══════════════════════════════════════════════════════════════
 
+def start_cycle_watchdog(deadline, driver_instance):
+    """Enforce the per-cycle hard deadline against blocking WebDriver calls.
+
+    A slow/unresponsive page over a proxy can block execute_script/get for a
+    long time, silently defeating the per-view budget (safe_eval has no
+    timeout). Quitting the driver from a daemon thread unblocks the pending
+    command so the cycle wraps up within budget (as an invalid view) instead
+    of hanging the whole attempt."""
+    def _watch():
+        while time.time() < deadline + 8:
+            time.sleep(0.5)
+        try:
+            if driver_instance is not None:
+                log(f"cycle watchdog: hard deadline passed, force-quitting driver")
+                driver_instance.quit()
+        except Exception:
+            pass
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def run_view_cycle(cycle_idx):
     """Run one full SmartLink view cycle. Returns (record, exit_code) or (None, code)."""
     global driver, proxy_blocked, PROXY, PROXY_IP, PROXY_PORT, monitor
@@ -1505,6 +1526,9 @@ def run_view_cycle(cycle_idx):
     monitor = PageMonitor()
     monitor.install(driver)
     cycle_start = time.time()
+    hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "60"))
+    cycle_deadline = cycle_start + hard_timeout
+    start_cycle_watchdog(cycle_deadline, driver)
 
     # Navigate to SmartLink
     nav_url = _add_utm_to_url(SMARTLINK_URL)
@@ -1556,8 +1580,6 @@ def run_view_cycle(cycle_idx):
     # Dwell — human-like reading + random clicks on the landing page, capped
     # so the whole cycle fits the 60s budget (chain may already have used some;
     # ~8s margin left for human_scroll + verify).
-    hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "60"))
-    cycle_deadline = cycle_start + hard_timeout
     dwell_secs = rand(10, 25)
     remaining = cycle_deadline - time.time()
     dwell_secs = max(1, min(dwell_secs, int(remaining) - 8))

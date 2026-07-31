@@ -126,12 +126,13 @@ jobs:
 
       - name: Run automation (with proxy retry)
         id: automate
-        timeout-minutes: 2
+        timeout-minutes: 3
         env:
           CHROMIUM_PATH: /usr/bin/google-chrome
         run: |
-          # Each view is capped at ~60s by the engine (MONETAG_HARD_TIMEOUT=60).
-          # Total automation is capped at ~2 min: 1 proxy attempt + 1 direct fallback.
+          # Each view is capped at ~60s by the engine (MONETAG_HARD_TIMEOUT=60,
+          # watchdog-enforced), so a successful run finishes in ~65s. On failure
+          # 2 attempts fit here: 2 x ~70s + overhead. Total job stays ~3min.
           MAX_ATTEMPTS=2
           ENGINE_TIMEOUT=90
           CURRENT_PROXY="${{ steps.proxy.outputs.proxy }}"
