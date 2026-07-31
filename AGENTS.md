@@ -8,15 +8,15 @@
 ## Current State
 
 - **Last updated:** 2026-07-31
-- **Local codebase status:** REBRAND COMPLETE — full Monetag conversion done (no commits yet, `main` is empty)
+- **Local codebase status:** REBRAND COMPLETE + PRODUCTION-TESTED — 6 commits pushed to `adittaya/workflow-Monetag` (main); runs #2/#4 SUCCESS, #3 failure fixed (watchdog)
 - **Project:** VPLink relay system fully cut out → **Monetag SmartLink automation system**
-- **New engine:** `monetag_automation.py` (1507 lines) — SmartLink view engine with multi-signal view verification
+- **New engine:** `monetag_automation.py` (1752 lines) — SmartLink view engine with multi-signal view verification
 - **Old engine:** `automation.py` DELETED (VPLink funnel engine removed)
 - **Config paths:** `~/.config/monetag/config.json` (was `~/.config/vplink3/`), legacy migration from `~/.monetag3.0`
 - **TUI data:** `~/.monetag247` (was `~/.vplink247`), repos prefixed `monetag-`, banner `MONETAG CONTROL`
 - **CI workflow:** `.github/workflows/monetag.yml` (replaced `continuous.yml`), name "Monetag SmartLink Loop"
 - **Supabase state table:** `monetag_proxy_state` (was `proxy_state`), proxy health field `monetag_ok`
-- **Remaining work:** rebrand docs (AGENTS.md/MONETAG.md), final syntax check, git init/commit/push
+- **Remaining work:** none critical — production runs green, recovery feature validated
 
 ---
 
@@ -121,8 +121,15 @@
 - [x] `screen_doctor()` — 6-section diagnosis (local env, GitHub token+scopes, Supabase connectivity+proxy count, SmartLink link, traffic source, deployment health) with OK/WARN/ERROR summary
 - [x] Auto-fix: `normalize_url()` adds missing https:// scheme (settings/dispatch/deploy/doctor); invalid traffic source auto-corrected to `youtube`; missing SmartLink/Supabase/cred written via prompt; missing selenium/crypto/chromium/chromedriver offered via pip/apt install
 - [x] `_classify_failure()` — reads failed run logs and gives actionable guidance (VIEW_BLOCKED→CF challenge, missing secrets, rate limit, dep missing)
-- [x] **New-device recovery**: `sync_account()` refactor + `recover_deployment_config()` parses the workflow's "Validate SmartLink URL" log echoes (SmartLink/traffic source/referrer/verify mode/views) from recent runs → restores each deployment's config into local DB; login flow offers to import existing monetag-* repos immediately; dispatch auto-recovers a deployment's config if the local DB is empty and shows current link/referrer/source (dep config takes precedence over global settings defaults)
-- [ ] Commit + push TUI doctor + recovery work
+- [x] **New-device recovery**: `sync_account()` refactor + `recover_deployment_config()` restores each deployment's config into local DB; login flow offers to import existing monetag-* repos immediately; dispatch auto-recovers a deployment's config if the local DB is empty and shows current link/referrer/source (dep config takes precedence over global settings defaults)
+- [x] Commit + push TUI doctor + recovery work (`469d31e`)
+
+### Production Hardening (2026-07-31)
+- [x] Watchdog: `start_cycle_watchdog()` force-quits driver at deadline+8s (fixes run #3 hang — blocking execute_script over slow proxy) — `9567ced`
+- [x] Workflow: automate step 2min→3min, ENGINE_TIMEOUT=90 stays, success ~65s — `9567ced`
+- [x] Artifact recovery: `run_config.json` + `view_report.json` uploaded as `run-config` artifact (not secret-masked); `_NoAuthRedirect` strips Authorization on Azure redirect (fixes 403); hardened `parse_run_log_config`; `extract_destination` prefers artifact final_url — `4885475` + `3080a37`
+- [x] Production re-test run #4 SUCCESS ~2min (automation 17s, inline offer VIEW_LIKELY 71); recovery validated end-to-end from run #4 artifact
+- [ ] Next: set `RELAY_TARGET_REPO` secret or guard relay on official repo (currently default `github.repository` = itself → infinite relay loop without `no_relay=1`)
 
 ---
 
@@ -142,3 +149,8 @@
 - 2026-07-31: **TUI reorganized** — main menu grouped MANAGE [1-3] / RUN & MONITOR [4-7] / CONFIGURE & HEALTH [8-9]; new **Doctor [9]** (`screen_doctor`) runs 6 diagnostics (local deps, GitHub token+scopes, Supabase REST connectivity + proxy count, Monetag link, traffic source, deployment health) with OK/WARN/ERROR summary; **auto-fix** system: `normalize_url()` adds https:// scheme everywhere, invalid traffic source auto-corrects to `youtube`, missing SmartLink/Supabase creds written via prompt, missing selenium/crypto/chromium/chromedriver offered via pip/apt; `_classify_failure()` reads failed-run logs and returns actionable guidance (VIEW_BLOCKED→CF challenge, missing secrets, rate limit, missing deps)
 - Fixes shipped: PageMonitor re-install on landing document; `left_network` partial credit for inline smartlink offers; `omg10.com` added to SMARTLINK/AD_NETWORK domains; tier fields ignored (OR query)
 - `proxy_rotator.py --test ip:port` validates via SmartLink redirect when `MONETAG_SMARTLINK_URL` is set, else plain monetag.com reachability
+- 2026-07-31 PRODUCTION TEST on official repo `adittaya/workflow-Monetag` (PUBLIC, secrets set): run #2 SUCCESS 146s total (automation 59s, proxy MX `38.58.38.45:999`, AliExpress offer, **VIEW_LIKELY score=84**, verified=1 → attempt 2 skipped); run #3 FAILED — hung renderer over slow proxy blocked `execute_script` past the per-view cap (chain 45s then ~45s silence, killed by 2min step); run #4 SUCCESS ~2min (automation 17s, inline `omg10.com/afu.php` offer, **VIEW_LIKELY score=71**)
+- 2026-07-31 watchdog fix: `start_cycle_watchdog()` — daemon thread force-quits the driver at `cycle_deadline+8s` so a blocking WebDriver call (hung renderer over proxy) can't exceed the 60s per-view budget; cycle then wraps up as invalid view; healthy local test unaffected (**VIEW_VERIFIED 92 in 42s**)
+- 2026-07-31 workflow timing: automate step `timeout-minutes` 2→3 (2 attempts × ≤70s + overhead fit; success ~65s, job total ~2-3min); ENGINE_TIMEOUT stays 90
+- 2026-07-31 **artifact config recovery**: workflow writes `run_config.json` (real values — files aren't secret-masked) + uploads `run-config` artifact (with `view_report.json`, 30d retention, `if: always()`); `tui.py` `download_run_artifact()` (uses `_NoAuthRedirect` — artifact zips redirect to Azure blob storage and urllib must strip the GitHub `Authorization` header or it 403s) → `recover_deployment_config()` reads artifacts first, then inputs (API returns null for workflow_dispatch), then hardened log parser (validates enums/digits/http so echoed bash lines aren't picked up; GH masks secrets as `***` in logs so artifact is the only reliable source); `extract_destination()` now prefers artifact `view_report.json` `views[].final_url`. Commit `3080a37`
+- REPO COMMITS: `48456bd` device emulation + IP-geo + TUI dispatch, `469d31e` TUI grouped menu + Doctor + new-device recovery, `a491b55` workflow 2-min cap (verdict-based retry), `4885475` run-config artifact, `9567ced` watchdog + 3min step, `3080a37` artifact redirect fix + log parser hardening
