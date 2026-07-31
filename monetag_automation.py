@@ -791,6 +791,7 @@ def _add_utm_to_url(url):
 # ══════════════════════════════════════════════════════════════
 
 def _build_stealth_js(p):
+    webrtc_priv_re = r"^(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.)"
     return f"""
     (function() {{
         var p = {json.dumps(p)};
@@ -888,13 +889,49 @@ def _build_stealth_js(p):
             Object.defineProperty(window, 'outerHeight', {{get: function() {{ return p.screen.availHeight; }} }});
         }}
 
-        if (navigator.connection) {{
-            Object.defineProperty(navigator.connection, 'rtt', {{get: function() {{ return Math.round(50 + Math.random() * 100); }} }});
-        }}
+        // NetworkInformation API — coherent mobile link profile (real Android
+        // phones report cellular/wifi with 4g, ~40-150ms rtt, ~2-8 Mbps downlink).
+        var _conn = p.touch
+            ? {{type: ['wifi', 'cellular'][Math.random() < 0.5 ? 0 : 1], effectiveType: '4g',
+               downlink: 2 + Math.random() * 6, rtt: 40 + Math.floor(Math.random() * 110),
+               saveData: false, addEventListener: function() {{}}, removeEventListener: function() {{}} }}
+            : null;
+        try {{
+            if (navigator.connection) {{
+                if (p.touch) {{
+                    Object.defineProperty(navigator.connection, 'type', {{get: function() {{ return _conn.type; }}}});
+                    Object.defineProperty(navigator.connection, 'effectiveType', {{get: function() {{ return _conn.effectiveType; }}}});
+                    Object.defineProperty(navigator.connection, 'downlink', {{get: function() {{ return _conn.downlink; }}}});
+                    Object.defineProperty(navigator.connection, 'rtt', {{get: function() {{ return _conn.rtt; }}}});
+                }}
+            }} else if (_conn) {{
+                Object.defineProperty(navigator, 'connection', {{get: function() {{ return _conn; }}}});
+            }}
+        }} catch (e) {{}}
 
-        Object.defineProperty(navigator, 'maxTouchPoints', {{
-            get: function() {{ return p.maxTouchPoints; }}
-        }});
+        // WebRTC: never expose a bare private IPv4 ICE candidate. Real Android
+        // Chrome hides local addresses behind mDNS .local hostnames, so strip
+        // private-range candidates so the runner/emulator LAN IP can't leak.
+        try {{
+            if (window.RTCPeerConnection) {{
+                var _addIceOrig = RTCPeerConnection.prototype.addIceCandidate;
+                RTCPeerConnection.prototype.addIceCandidate = function(candidate) {{
+                    try {{
+                        var c = candidate && candidate.candidate;
+                        if (c && /{webrtc_priv_re}/.test(c)) {{
+                            return Promise.resolve();
+                        }}
+                    }} catch (e) {{}}
+                    return _addIceOrig.apply(this, arguments);
+                }};
+            }}
+        }} catch (e) {{}}
+
+        try {{
+            Object.defineProperty(navigator, 'maxTouchPoints', {{
+                get: function() {{ return p.maxTouchPoints; }}
+            }});
+        }} catch (e) {{}}
 
         // Touch / mobile-device API surface must exist only on emulated mobiles
         if (p.touch) {{
@@ -1211,7 +1248,7 @@ def _ua_metadata(profile):
     if is_mobile:
         platform = "Android"
         platform_version = (am.group(1) if am else "13") + ".0.0"
-        arch, model, bitness = "arm", profile.get("name", ""), ""
+        arch, model, bitness = "", profile.get("name", ""), ""
     elif plat == "Win32":
         platform, platform_version = "Windows", "10.0.0"
         arch, model, bitness = "x86", "", "64"
@@ -1259,6 +1296,7 @@ def _apply_cdp_profile(profile):
         driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
             "userAgent": profile["userAgent"],
             "platform": profile["platform"],
+            "acceptLanguage": profile["languages"][0] + "," + profile["languages"][1] + ";q=0.9,en;q=0.7",
             "userAgentMetadata": _ua_metadata(profile),
         })
     except Exception:
