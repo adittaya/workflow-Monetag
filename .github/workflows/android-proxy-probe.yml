@@ -69,17 +69,8 @@ jobs:
             nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &
             sleep 20
 
-            echo "=== FETCH PROXY FROM POOL ==="
-            PROXY=$(timeout 90 python3 proxy_rotator.py premium | tail -1)
-            echo "PROXY=$PROXY"
-            if [ -z "$PROXY" ]; then
-              echo "::warning::No proxy from pool — cannot validate proxy path"
-              exit 0
-            fi
-
             echo "=== PROXY + SMARTLINK PROBE (real Android Chrome) ==="
-            export MONETAG_PROXY="http://$PROXY"
-            python3 probe/android_proxy.py || true
+            timeout 180 python3 probe/run_proxy_probe.py || true
 
             echo "=== APPIUM LOG TAIL ==="
             tail -40 /tmp/appium.log || true
