@@ -1,0 +1,46 @@
+name: Android Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Environment / virtualization check
+        run: |
+          if [ -e /dev/kvm ]; then echo "KVM: PRESENT"; else echo "KVM: ABSENT"; fi
+          lscpu | grep -iE 'virtual|hypervisor' || true
+          echo "cores: $(nproc), mem: $(free -g | awk '/Mem:/{print $2}')GB, disk: $(df -h / | awk 'NR==2{print $4}')"
+          which adb || echo "adb missing"
+
+      - name: Boot docker-android emulator (software/TCG test)
+        timeout-minutes: 28
+        run: |
+          set -x
+          docker run -d --name android \
+            -p 5554:5554 -p 5555:5555 -p 4723:4723 \
+            --privileged \
+            -e DEVICE=emulator -e EMULATOR_ARCH=x86 \
+            -e EMULATOR_GPU=swiftshader_indirect \
+            budtmo/docker-android-x86-9.0
+          echo "container started, waiting for boot..."
+          start=$(date +%s)
+          adb connect 127.0.0.1:5555 || true
+          while true; do
+            now=$(date +%s)
+            if [ $((now - start)) -gt 1650 ]; then
+              echo "TIMEOUT after $((now - start))s"
+              docker logs android 2>&1 | tail -30 || true
+              exit 1
+            fi
+            if adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; then
+              echo "BOOT_COMPLETED after $((now - start))s"
+              break
+            fi
+            sleep 20
+          done
+          adb -s 127.0.0.1:5555 shell getprop ro.build.version.release
+          adb -s 127.0.0.1:5555 shell getprop ro.product.model
+          echo "PROBE RESULT: Android booted in $(( $(date +%s) - start ))s without KVM"
