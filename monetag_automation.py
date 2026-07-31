@@ -97,7 +97,7 @@ TRAFFIC_UTM = {
 # ── Monetag / ad-network domains that should NOT be the final view target ──
 AD_NETWORK_DOMAINS = [
     "oclasrv.com", "go.oclasrv.com",
-    "monetag.com", "www.monetag.com", "smart.monetag.com",
+    "monetag.com", "www.monetag.com", "smart.monetag.com", "omg10.com",
     "propellerads.com", "propelleradsmedia.com",
     "adskeeper.com", "adsterra.com", "hilltopads.com",
     "googleadservices.com", "googlesyndication.com", "doubleclick.net",
@@ -105,7 +105,7 @@ AD_NETWORK_DOMAINS = [
     "exoclick.com", "trafficjunky.com", "popads.net", "clickadu.com",
 ]
 SMARTLINK_DOMAINS = [
-    "oclasrv.com", "go.oclasrv.com", "monetag.com", "smart.monetag.com",
+    "oclasrv.com", "go.oclasrv.com", "monetag.com", "smart.monetag.com", "omg10.com",
 ]
 
 OFFER_SIGNAL_DOMAINS = [

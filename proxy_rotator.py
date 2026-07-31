@@ -62,8 +62,6 @@ SUPABASE_REST = "/rest/v1"
 TEST_URL = "https://monetag.com/"
 STATE_TABLE = "/monetag_proxy_state"
 STATE_TTL_HOURS = 24
-PREMIUM_FIELD = os.environ.get("MONETAG_PROXY_FIELD", "monetag_ok")
-STANDARD_FIELD = "e2_ok"
 
 
 def supabase_fetch(endpoint, method="GET", timeout=25, data=None):
@@ -83,14 +81,14 @@ def supabase_fetch(endpoint, method="GET", timeout=25, data=None):
 
 
 def fetch_proxies(tier="premium", batch_size=500, max_batches=20):
-    """Fetch all proxies from Supabase with pagination. Returns unlimited proxies in batches of batch_size."""
-    field = PREMIUM_FIELD if tier == "premium" else STANDARD_FIELD
+    """Fetch all proxies from Supabase with pagination. Premium and normal tiers
+    share the same pool, so both monetag_ok and e2_ok rows are returned."""
     all_proxies = []
     for batch in range(max_batches):
         offset = batch * batch_size
         endpoint = (
             f"/proxy_results?select=ip,port,proto,country,latency_ms"
-            f"&{field}=eq.true"
+            f"&or=(monetag_ok.eq.true,e2_ok.eq.true)"
             f"&order=latency_ms.asc"
             f"&limit={batch_size}&offset={offset}"
         )
@@ -257,7 +255,7 @@ def test_proxy_selenium(proxy, timeout_s=60):
             final_url = driver.current_url
             if "chrome-error" in final_url or "about:blank" in final_url or final_url.startswith("data:"):
                 break
-            if smartlink and "oclasrv.com" not in final_url and "monetag.com" not in final_url:
+            if smartlink and "oclasrv.com" not in final_url and "monetag.com" not in final_url and "omg10.com" not in final_url:
                 left_smartlink = True
                 break
 
