@@ -3,7 +3,7 @@
 emulator. No proxy yet — proves the redirect chain + landing works on real
 Android Chrome. Captures final URL, title, body size, screenshot.
 """
-import os, time, sys, traceback
+import os, time, sys, traceback, shutil, glob
 
 url = os.environ.get("MONETAG_SMARTLINK_URL", "").strip()
 if not url:
@@ -22,6 +22,13 @@ opts.set_capability("appium:deviceName", "emulator-5554")
 opts.set_capability("browserName", "Chrome")
 opts.set_capability("appium:automationName", "UiAutomator2")
 opts.set_capability("appium:noReset", True)
+_cd = shutil.which("chromedriver") or glob.glob("/usr/local/lib/node_modules/chromedriver/lib/chromedriver/chromedriver")
+if _cd:
+    opts.set_capability("appium:chromedriverExecutable", _cd if isinstance(_cd, str) else _cd[0])
+    print("CHROMEDRIVER:", _cd)
+else:
+    opts.set_capability("appium:chromedriverAutodownload", True)
+    print("CHROMEDRIVER: autodownload")
 opts.add_argument("--disable-blink-features=AutomationControlled")
 opts.add_argument("--no-first-run")
 

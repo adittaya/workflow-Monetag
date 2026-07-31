@@ -61,6 +61,10 @@ jobs:
             appium --version
             appium driver install uiautomator2
 
+            echo "=== INSTALL CHROMEDRIVER FOR EMULATOR CHROME 124 ==="
+            sudo npm install -g chromedriver@124 --no-fund --no-audit
+            which chromedriver || ls /usr/local/lib/node_modules/chromedriver/lib/chromedriver/chromedriver || echo "chromedriver missing"
+
             echo "=== INSTALL SELENIUM (python) ==="
             python3 -m pip install --user --quiet selenium
 

@@ -3,7 +3,7 @@
 emulator: load a URL served on the host (adb reverse), read the real UA/UA-CH,
 verify element interaction works. No proxy — just the drive test.
 """
-import subprocess, threading, http.server, time, os, json, sys
+import subprocess, threading, http.server, time, os, json, sys, shutil, glob
 
 OUT = "evidence/appium_ua_capture.txt"
 HDRS = ("user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
@@ -45,6 +45,13 @@ opts.set_capability("browserName", "Chrome")
 opts.set_capability("appium:automationName", "UiAutomator2")
 opts.set_capability("appium:noReset", True)
 opts.set_capability("appium:adbExecTimeout", 60000)
+_cd = shutil.which("chromedriver") or glob.glob("/usr/local/lib/node_modules/chromedriver/lib/chromedriver/chromedriver")
+if _cd:
+    opts.set_capability("appium:chromedriverExecutable", _cd if isinstance(_cd, str) else _cd[0])
+    print("CHROMEDRIVER:", _cd)
+else:
+    opts.set_capability("appium:chromedriverAutodownload", True)
+    print("CHROMEDRIVER: autodownload")
 opts.add_argument("--disable-blink-features=AutomationControlled")
 opts.add_argument("--no-first-run")
 
