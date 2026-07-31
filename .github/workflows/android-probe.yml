@@ -24,14 +24,14 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: KVM availability diagnostic
+      - name: Prepare KVM + audio libs
         run: |
           set -x
-          ls -l /dev/kvm || true
+          sudo apt-get update && sudo apt-get install -y libpulse0
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
           groups || true
-          id -u || true
-          echo "$ANDROID_HOME"
-          test -f "$ANDROID_HOME/emulator/emulator" && "$ANDROID_HOME/emulator/emulator" -accel-check || echo "no emulator binary yet"
+          "$ANDROID_HOME/emulator/emulator" -accel-check || true
 
       - name: Run headless x86_64 Android emulator + collect evidence
         uses: reactivecircus/android-emulator-runner@v2
@@ -41,7 +41,7 @@ jobs:
           arch: x86_64
           profile: pixel_7
           disable-animations: true
-          headless: true
+          disable-linux-hw-accel: false
           emulator-options: -accel on
           script: |
             set -e
