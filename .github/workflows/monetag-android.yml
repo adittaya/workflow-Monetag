@@ -1,8 +1,8 @@
 name: Monetag Android Loop (real Chrome)
 
 on:
-  schedule:
-    - cron: '5 * * * *'
+  # cron paused during validation — re-enable once Android counting is
+  # dashboard-confirmed (previously: '5 * * * *')
   workflow_dispatch:
     inputs:
       smartlink_url:
@@ -29,8 +29,10 @@ on:
         description: 'Set to "1" to skip the relay (test mode)'
         required: false
         default: ''
+  # own relay event type so the shared 'relay' event (desktop loop) does NOT
+  # trigger this workflow — otherwise every relay doubles across both loops
   repository_dispatch:
-    types: [relay]
+    types: [relay-android]
 
 concurrency:
   group: monetag-android-${{ github.repository }}${{ github.event.inputs.no_relay && '-test' || '' }}
@@ -168,7 +170,7 @@ jobs:
             exit 0
           fi
 
-          PAYLOAD='{"event_type":"relay","client_payload":{"smartlink_url":"'"${MONETAG_SMARTLINK_URL}"'","traffic_source":"'"${MONETAG_TRAFFIC_SOURCE}"'","traffic_source_url":"'"${MONETAG_REFERER}"'","verify_mode":"'"${MONETAG_VERIFY_MODE}"'","views":"'"${MONETAG_VIEWS}"'"}}'
+          PAYLOAD='{"event_type":"relay-android","client_payload":{"smartlink_url":"'"${MONETAG_SMARTLINK_URL}"'","traffic_source":"'"${MONETAG_TRAFFIC_SOURCE}"'","traffic_source_url":"'"${MONETAG_REFERER}"'","verify_mode":"'"${MONETAG_VERIFY_MODE}"'","views":"'"${MONETAG_VIEWS}"'"}}'
 
           for TOKEN_VAR in TRIGGER_TOKEN GITHUB_TOKEN; do
             TOKEN="${!TOKEN_VAR}"
