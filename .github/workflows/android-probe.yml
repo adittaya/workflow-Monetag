@@ -8,39 +8,60 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Environment / virtualization check
+      - name: Virtualization check
         run: |
-          if [ -e /dev/kvm ]; then echo "KVM: PRESENT"; else echo "KVM: ABSENT"; fi
-          lscpu | grep -iE 'virtual|hypervisor' || true
+          if [ -e /dev/kvm ]; then echo "KVM: PRESENT"; ls -l /dev/kvm; else echo "KVM: ABSENT"; fi
+          id
+          getent group kvm || true
           echo "cores: $(nproc), mem: $(free -g | awk '/Mem:/{print $2}')GB, disk: $(df -h / | awk 'NR==2{print $4}')"
-          which adb || echo "adb missing"
 
-      - name: Boot docker-android emulator (software/TCG test)
-        timeout-minutes: 28
+      - name: Install QEMU + adb
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86-64 qemu-utils android-tools-adb
+
+      - name: Download Android-x86 ISO + create data disk
+        run: |
+          curl -L -o android-x86.iso "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download"
+          ls -lh android-x86.iso
+          qemu-img create -f raw data.img 4G
+
+      - name: Boot Android-x86 in QEMU (KVM) — measure boot time
+        timeout-minutes: 25
         run: |
           set -x
-          docker run -d --name android \
-            -p 5554:5554 -p 5555:5555 -p 4723:4723 \
-            --privileged \
-            -e DEVICE=emulator -e EMULATOR_ARCH=x86 \
-            -e EMULATOR_GPU=swiftshader_indirect \
-            budtmo/docker-android-x86-9.0
-          echo "container started, waiting for boot..."
           start=$(date +%s)
-          adb connect 127.0.0.1:5555 || true
+          sudo qemu-system-x86_64 \
+            -enable-kvm -cpu host -m 4096 -smp 4 \
+            -drive file=data.img,format=raw,if=ide \
+            -cdrom android-x86.iso -boot d \
+            -display none -vga std -no-reboot \
+            -netdev user,id=n1,hostfwd=tcp::5555-:5555 \
+            -device e1000,netdev=n1 \
+            -monitor unix:/tmp/qmon,server,nowait &
+          QPID=$!
+          echo "qemu launched pid=$QPID"
+          sleep 3
+          kill -0 $QPID 2>/dev/null || { echo "QEMU exited immediately"; exit 1; }
+          adb kill-server >/dev/null 2>&1 || true
+          adb start-server >/dev/null 2>&1 || true
           while true; do
             now=$(date +%s)
-            if [ $((now - start)) -gt 1650 ]; then
-              echo "TIMEOUT after $((now - start))s"
-              docker logs android 2>&1 | tail -30 || true
+            if [ $((now - start)) -gt 1450 ]; then
+              echo "TIMEOUT after $((now-start))s"
+              kill $QPID 2>/dev/null || true
               exit 1
             fi
+            if ! kill -0 $QPID 2>/dev/null; then
+              echo "QEMU died"; exit 1
+            fi
+            adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
             if adb -s 127.0.0.1:5555 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; then
               echo "BOOT_COMPLETED after $((now - start))s"
               break
             fi
-            sleep 20
+            sleep 15
           done
           adb -s 127.0.0.1:5555 shell getprop ro.build.version.release
           adb -s 127.0.0.1:5555 shell getprop ro.product.model
-          echo "PROBE RESULT: Android booted in $(( $(date +%s) - start ))s without KVM"
+          echo "PROBE RESULT: Android booted in $(( $(date +%s) - start ))s with KVM"
