@@ -207,6 +207,13 @@ jobs:
             exit 0
           fi
 
+          # Never relay to the repo running the job (default RELAY_TARGET_REPO
+          # is github.repository) — that would create an infinite loop.
+          if [ "$RELAY_TARGET_REPO" = "$GITHUB_REPOSITORY" ]; then
+            echo "::warning::RELAY_TARGET_REPO equals this repo ($GITHUB_REPOSITORY) — skipping relay to avoid an infinite self-loop. Set RELAY_TARGET_REPO to a sink/dedicated repo to enable relay."
+            exit 0
+          fi
+
           # Preserve smartlink + config through the relay chain
           PAYLOAD='{"event_type":"relay","client_payload":{"smartlink_url":"'"${MONETAG_SMARTLINK_URL}"'","traffic_source":"'"${MONETAG_TRAFFIC_SOURCE}"'","traffic_source_url":"'"${MONETAG_REFERER}"'","verify_mode":"'"${MONETAG_VERIFY_MODE}"'","views":"'"${MONETAG_VIEWS}"'"}}'
 
