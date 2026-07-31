@@ -21,3 +21,4 @@ manager/manager.db
 template/
 *.info.json
 .opencode/
+view_report.json
