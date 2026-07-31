@@ -185,7 +185,7 @@ The CI workflow parses this summary into the step summary and decides the run st
 | `MONETAG_HEADLESS` | — | `"1"` forces headless |
 | `MONETAG_DEBUG` | — | `"1"` saves debug screenshots |
 | `MONETAG_MOBILE` | `1` | mobile profile unless `0` |
-| `MONETAG_HARD_TIMEOUT` | `300` | per-cycle cap in seconds |
+| `MONETAG_HARD_TIMEOUT` | `60` | per-cycle cap in seconds |
 | `MONETAG_NONINTERACTIVE` | — | headless CI mode |
 
 ### CLI

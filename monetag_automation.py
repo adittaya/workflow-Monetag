@@ -23,7 +23,7 @@ Env vars (CI / headless):
     MONETAG_REFERER         exact referrer URL to inject (overrides traffic source)
     MONETAG_HEADLESS        "1" to force headless
     MONETAG_DEBUG           "1" to save screenshots
-    MONETAG_HARD_TIMEOUT    per-cycle seconds cap (default: 300)
+    MONETAG_HARD_TIMEOUT    per-cycle seconds cap (default: 60)
 
 Output:
     view_report.json  — per-cycle view records + aggregate summary
@@ -116,7 +116,8 @@ OFFER_SIGNAL_DOMAINS = [
 
 BLOCK_SIGNATURES = [
     "cf-browser-verification", "challenge-form", "cf-challenge",
-    "_cf_chl_opt", "checking your browser", "verify you are human",
+    "_cf_chl_opt", "challenges.cloudflare.com", "turnstile", "__cf_chl_tk",
+    "checking your browser", "verify you are human", "cf-chl",
     "attention required", "access denied", "forbidden", "404 not found",
     "page not found", "captcha", "puzzle", "something went wrong",
     "sorry, you have been blocked", "website unavailable",
@@ -989,8 +990,8 @@ def follow_redirect_chain():
     chain = []
     seen = {}
     start = time.time()
-    hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "300"))
-    deadline = start + min(hard_timeout, 180)
+    hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "60"))
+    deadline = start + hard_timeout
     last_url = ""
     stable_for = 0.0
     cloudflare_seen = False
@@ -1025,24 +1026,28 @@ def follow_redirect_chain():
                 stable_for = 0.0
                 continue
 
-        # Detect Cloudflare challenge
+        # Detect Cloudflare challenge (classic browser check + Turnstile)
         if last_url and stable_for >= 2:
             cf = safe_eval("""
                 var html = (document.documentElement?.innerHTML || '').substring(0, 3000);
+                var url = location.href || '';
                 return html.indexOf('cf-browser-verification') >= 0
                     || html.indexOf('challenge-form') >= 0
                     || html.indexOf('cf-challenge') >= 0
                     || html.indexOf('_cf_chl_opt') >= 0
-                    || html.indexOf('Checking your browser') >= 0;
+                    || html.indexOf('Checking your browser') >= 0
+                    || html.indexOf('turnstile') >= 0
+                    || url.indexOf('challenges.cloudflare.com') >= 0
+                    || url.indexOf('__cf_chl_tk') >= 0;
             """)
             if cf:
                 cloudflare_seen = True
-                log("Cloudflare challenge detected, refreshing once...")
+                log("Cloudflare challenge detected (browser check / Turnstile), refreshing once...")
                 try:
                     driver.refresh()
                 except Exception:
                     pass
-                time.sleep(4)
+                time.sleep(3)
                 stable_for = 0.0
                 continue
 
@@ -1327,12 +1332,16 @@ def run_view_cycle(cycle_idx):
     except Exception:
         pass
 
-    # Dwell — human-like read on the landing page
+    # Dwell — human-like read on the landing page, capped so the whole
+    # cycle fits inside the 60s budget (chain may already have used some).
+    hard_timeout = int(os.environ.get("MONETAG_HARD_TIMEOUT", "60"))
+    cycle_deadline = cycle_start + hard_timeout
     dwell_secs = rand(10, 25)
+    remaining = cycle_deadline - time.time()
+    dwell_secs = max(1, min(dwell_secs, int(remaining)))
     snap = monitor.snapshot()
     known_height = snap.get("height", 0)
     human_read(duration_sec=dwell_secs, known_height=known_height)
-    dwell_secs = min(dwell_secs, time.time() - cycle_start)
     human_scroll()
 
     # Verify

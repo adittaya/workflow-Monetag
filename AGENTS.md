@@ -91,7 +91,7 @@
 | `MONETAG_REFERER` | — | exact referrer URL (overrides traffic source) |
 | `MONETAG_HEADLESS` | — | "1" forces headless |
 | `MONETAG_DEBUG` | — | "1" saves screenshots |
-| `MONETAG_HARD_TIMEOUT` | 300 | per-cycle seconds cap |
+| `MONETAG_HARD_TIMEOUT` | 60 | per-cycle seconds cap |
 
 ---
 
@@ -121,6 +121,9 @@
 
 - Repo: `adittaya/workflow-monetag` — pushed to GitHub (PUBLIC), commits: init, schema fix, pool-share fix, verify fix
 - LIVE TESTED 2026-07-31: SmartLink `https://omg10.com/4/11465287` via Supabase pool → AliExpress offer, **VIEW_VERIFIED score=100**; inline smartlink views score LIKELY
+- PHONE TRACE (2026-07-31, `/mnt/sdcard/chrome-trace-2026-07-31-055619.pftrace`): confirmed SmartLink randomness — entry `omg10.com/afu.php?zoneid=` → random trackers (`go.getdirectbonus.com`, `in1.bdfirst.cloud/click?cost=0.000552`) → random offers per visitor (`stake.ac` casino, `subemail.site` email-submit), plus **Cloudflare Turnstile** challenges (`challenges.cloudflare.com/.../turnstile/...`, `__cf_chl_tk` cookie)
+- 2026-07-31: per-view budget now 60s (`MONETAG_HARD_TIMEOUT` default 300→60); Turnstile/`challenges.cloudflare.com`/`__cf_chl_tk` added to CF detection + block signatures; dwell capped to fit remaining cycle budget
+- POST-CHANGE LIVE TEST (2026-07-31, MONETAG_HEADLESS=1, no proxy): `omg10.com/4/11465287` → 1-hop redirect to `best.aliexpress.com/?aff_fcid=...&tt=CPS_NO`, **VIEW_VERIFIED score=94 in 34s** (chain 24s + dwell/verify 10s) — fits the 60s budget
 - Config: credentials configured locally at `~/.config/monetag/config.json` (gitignored)
 - Supabase: `proxy_results` (19 proxies, all `monetag_ok=true`) + `monetag_proxy_state` (empty) — both tiers share same pool
 - Local pool cleanup: 2 dead proxies deleted during testing; ~17 alive
