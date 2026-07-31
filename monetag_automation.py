@@ -730,9 +730,9 @@ def human_click(selector):
 
 
 def _inject_traffic_source():
-    if TRAFFIC_SOURCE not in TRAFFIC_REFERRERS:
-        return
-    referrer = os.environ.get("MONETAG_REFERER", "") or TRAFFIC_REFERRERS[TRAFFIC_SOURCE]
+    referrer = os.environ.get("MONETAG_REFERER", "").strip()
+    if not referrer and TRAFFIC_SOURCE in TRAFFIC_REFERRERS:
+        referrer = TRAFFIC_REFERRERS[TRAFFIC_SOURCE]
     if not referrer:
         return
     referrer_js = f"""

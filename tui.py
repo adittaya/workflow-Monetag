@@ -258,7 +258,7 @@ def set_repo_secret(owner, repo, token, secret_name, secret_value):
 
 # ─── Deploy / Remove ──────────────────────────────────────────────────────────
 
-def deploy_new(repo_name, token, username, settings, step_cb=None, smartlink_url=""):
+def deploy_new(repo_name, token, username, settings, step_cb=None, smartlink_url="", traffic_source_url=""):
     """Deploy a new Monetag instance. step_cb(step_num, msg) for progress."""
     full_name = repo_name if repo_name.startswith("monetag-") else f"monetag-{repo_name}"
     repo_created = False
@@ -362,6 +362,8 @@ def deploy_new(repo_name, token, username, settings, step_cb=None, smartlink_url
     }
     if smartlink_url:
         secrets["MONETAG_SMARTLINK_URL"] = smartlink_url
+    if traffic_source_url:
+        secrets["MONETAG_REFERER"] = traffic_source_url
     su, sk, ss = get_supabase_creds(settings)
     if su:
         secrets["SUPABASE_URL"] = su
@@ -397,6 +399,8 @@ def deploy_new(repo_name, token, username, settings, step_cb=None, smartlink_url
         inputs = {}
         if smartlink_url:
             inputs["smartlink_url"] = smartlink_url
+        if traffic_source_url:
+            inputs["traffic_source_url"] = traffic_source_url
         gh(f"/repos/{username}/{full_name}/actions/workflows/{wf['id']}/dispatches", token, "POST",
            {"ref": "main", "inputs": inputs})
     else:
@@ -410,6 +414,8 @@ def deploy_new(repo_name, token, username, settings, step_cb=None, smartlink_url
     }
     if smartlink_url:
         dep["smartlink_url"] = smartlink_url
+    if traffic_source_url:
+        dep["traffic_source_url"] = traffic_source_url
     deps = load_json("deployments.json")
     deps[full_name] = dep
     save_json("deployments.json", deps)
@@ -679,11 +685,16 @@ def screen_deploy():
         input(f"\n  Press Enter to continue...")
         return
     full_name = repo_name if repo_name.startswith("monetag-") else f"monetag-{repo_name}"
-    smartlink_url = prompt("SmartLink URL (e.g. go.oclasrv.com/afu.php?zoneid=XXXXX)")
+    settings = load_json("settings.json")
+    smartlink_url = prompt("Monetag link (SmartLink URL)", settings.get("smartlink_url", ""))
     if not smartlink_url:
         error("SmartLink URL is required")
         input(f"\n  Press Enter to continue...")
         return
+    traffic_source_url = prompt("Traffic source URL (YouTube / any link, blank = none)",
+                                settings.get("traffic_source_url", ""))
+    if traffic_source_url and not traffic_source_url.startswith("http"):
+        traffic_source_url = "https://" + traffic_source_url
 
     if not confirm(f"Deploy {full_name} as @{username}?"):
         return
@@ -693,7 +704,8 @@ def screen_deploy():
     def show_step(n, msg):
         print(f"  {C_BOLD}[{n}/{TOTAL}]{C_RESET} {msg}")
 
-    dep, err = deploy_new(repo_name, token, username, settings, step_cb=show_step, smartlink_url=smartlink_url)
+    dep, err = deploy_new(repo_name, token, username, settings, step_cb=show_step,
+                          smartlink_url=smartlink_url, traffic_source_url=traffic_source_url)
     print()
     if err:
         error(err)
@@ -987,13 +999,15 @@ def screen_sync():
             warn(e)
     input(f"\n  Press Enter to continue...")
 
-# ─── Screen: Dispatch ─────────────────────────────────────────────────────────
+# ─── Screen: Dispatch / Re-dispatch ───────────────────────────────────────────
 
 def screen_dispatch():
     clear()
     banner()
-    print(f"\n  {C_BOLDWHITE}MANUALLY TRIGGER WORKFLOW{C_RESET}")
+    print(f"\n  {C_BOLDWHITE}TRIGGER / RE-DISPATCH WORKFLOW{C_RESET}")
     divider()
+    info("Change the Monetag link or traffic source URL and re-trigger.")
+    info("Defaults come from Settings [8]; values are saved for next time.")
 
     token, _ = get_active_token()
     if not token:
@@ -1023,12 +1037,35 @@ def screen_dispatch():
     repo = repos[idx]
     owner = repo["owner"]["login"]
     rn = repo["name"]
-    smartlink_url = prompt("SmartLink URL (leave blank if none)")
+    settings = load_json("settings.json")
+    deps = load_json("deployments.json")
+    dep = deps.get(rn, {})
+
+    def_or_sl = settings.get("smartlink_url") or dep.get("smartlink_url") or ""
+    def_or_ts = settings.get("traffic_source_url") or dep.get("traffic_source_url") or ""
+    def_or_src = dep.get("traffic_source") or settings.get("traffic_source") or "youtube"
+
+    smartlink_url = prompt("Monetag link (SmartLink URL)", def_or_sl)
+    traffic_source_url = prompt("Traffic source URL (YouTube / any link, blank = none)", def_or_ts)
+    traffic_source = prompt("Traffic source (youtube|google|facebook|twitter|direct)", def_or_src)
+
+    if smartlink_url and not smartlink_url.startswith("http"):
+        smartlink_url = "https://" + smartlink_url
+    if traffic_source_url and not traffic_source_url.startswith("http"):
+        traffic_source_url = "https://" + traffic_source_url
+
     inputs = {}
     if smartlink_url:
         inputs["smartlink_url"] = smartlink_url
+    if traffic_source_url:
+        inputs["traffic_source_url"] = traffic_source_url
+    if traffic_source:
+        inputs["traffic_source"] = traffic_source
 
-    if not confirm(f"Trigger workflow on {rn}?"):
+    if not confirm(f"Trigger workflow on {rn}?\n"
+                   f"  SmartLink: {smartlink_url or '(none)'}\n"
+                   f"  Traffic source URL: {traffic_source_url or '(none)'}\n"
+                   f"  Traffic source: {traffic_source or '(default)'}"):
         return
 
     loading(f"Dispatching workflow on {rn}")
@@ -1044,6 +1081,19 @@ def screen_dispatch():
         error(f"Dispatch failed: {resp.get('message', '')}")
     else:
         success(f"Workflow triggered on {rn}")
+        # Persist the URLs so a later re-dispatch keeps using them
+        if smartlink_url:
+            settings["smartlink_url"] = smartlink_url
+            dep["smartlink_url"] = smartlink_url
+        if traffic_source_url:
+            settings["traffic_source_url"] = traffic_source_url
+            dep["traffic_source_url"] = traffic_source_url
+        if traffic_source:
+            settings["traffic_source"] = traffic_source
+            dep["traffic_source"] = traffic_source
+        dep["last_dispatch_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        save_json("settings.json", settings)
+        save_json("deployments.json", deps)
     input(f"\n  Press Enter to continue...")
 
 # ─── Screen: Settings ─────────────────────────────────────────────────────────
@@ -1059,17 +1109,20 @@ def screen_settings():
         sk = settings.get("supabase_key", "")
         ss = settings.get("supabase_secret", "")
         sl = settings.get("smartlink_url", "")
+        ts_url = settings.get("traffic_source_url", "")
 
         print(f"  {C_DIM}Supabase URL:{C_RESET}        {su or f'{C_YELLOW}not set{C_RESET}'}")
         print(f"  {C_DIM}Supabase Key:{C_RESET}        {sk[:4]}...{sk[-4:] if len(sk) > 4 else ''}" if sk else f"  {C_DIM}Supabase Key:{C_RESET}        {C_YELLOW}not set{C_RESET}")
         print(f"  {C_DIM}Supabase Secret:{C_RESET}      {ss[:4]}...{ss[-4:] if len(ss) > 4 else ''}" if ss else f"  {C_DIM}Supabase Secret:{C_RESET}      {C_YELLOW}not set{C_RESET}")
-        print(f"  {C_DIM}SmartLink URL:{C_RESET}         {sl or f'{C_YELLOW}not set{C_RESET}'}")
+        print(f"  {C_DIM}Monetag Link:{C_RESET}          {sl or f'{C_YELLOW}not set{C_RESET}'}")
+        print(f"  {C_DIM}Traffic Src URL:{C_RESET}       {ts_url or f'{C_YELLOW}not set{C_RESET}'}")
         print()
         print(f"  {C_BOLD}[1]{C_RESET} Set Supabase URL")
         print(f"  {C_BOLD}[2]{C_RESET} Set Supabase Key")
         print(f"  {C_BOLD}[3]{C_RESET} Set Supabase Secret")
-        print(f"  {C_BOLD}[4]{C_RESET} Set default SmartLink URL")
-        print(f"  {C_BOLD}[5]{C_RESET} Clear all settings")
+        print(f"  {C_BOLD}[4]{C_RESET} Set Monetag link (SmartLink URL)")
+        print(f"  {C_BOLD}[5]{C_RESET} Set Traffic Source URL (YouTube / any link)")
+        print(f"  {C_BOLD}[6]{C_RESET} Clear all settings")
         print(f"  {C_BOLD}[0]{C_RESET} Back\n")
 
         choice = prompt("Choice")
@@ -1091,11 +1144,16 @@ def screen_settings():
             save_json("settings.json", settings)
             success("Saved")
         elif choice == "4":
-            val = prompt("Default SmartLink URL", settings.get("smartlink_url"))
+            val = prompt("Monetag link (SmartLink URL)", settings.get("smartlink_url"))
             settings["smartlink_url"] = val
             save_json("settings.json", settings)
             success("Saved")
         elif choice == "5":
+            val = prompt("Traffic source URL (YouTube video / any link)", settings.get("traffic_source_url"))
+            settings["traffic_source_url"] = val
+            save_json("settings.json", settings)
+            success("Saved")
+        elif choice == "6":
             if confirm("Clear all settings?"):
                 save_json("settings.json", {})
                 success("Settings cleared")
@@ -1114,7 +1172,7 @@ def main_menu():
         print(f"  {C_BOLD}[4]{C_RESET} Sync from GitHub")
         print(f"  {C_BOLD}[5]{C_RESET} View status")
         print(f"  {C_BOLD}[6]{C_RESET} View logs")
-        print(f"  {C_BOLD}[7]{C_RESET} Trigger workflow")
+        print(f"  {C_BOLD}[7]{C_RESET} Trigger / re-dispatch workflow (change URLs)")
         print(f"  {C_BOLD}[8]{C_RESET} Settings")
         print(f"  {C_BOLD}[0]{C_RESET} Quit\n")
 
