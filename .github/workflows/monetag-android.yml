@@ -133,9 +133,7 @@ jobs:
             python3 config.py --set supabase_secret "$SUPABASE_SECRET"
             python3 config.py --set proxy_enabled true
             python3 config.py --set proxy_tier premium
-            if [ -n "$IPCOOK_URL" ]; then
-              python3 config.py --set ipcook_url "$IPCOOK_URL"
-            fi
+            if [ -n "$IPCOOK_URL" ]; then python3 config.py --set ipcook_url "$IPCOOK_URL"; fi
 
             echo "=== START APPIUM ==="
             nohup appium -p 4723 --log-level info > /tmp/appium.log 2>&1 &
