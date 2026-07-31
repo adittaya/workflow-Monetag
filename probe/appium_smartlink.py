@@ -18,10 +18,10 @@ except ImportError:
 
 opts = webdriver.ChromeOptions()
 opts.set_capability("platformName", "Android")
-opts.set_capability("deviceName", "emulator-5554")
+opts.set_capability("appium:deviceName", "emulator-5554")
 opts.set_capability("browserName", "Chrome")
-opts.set_capability("automationName", "UiAutomator2")
-opts.set_capability("noReset", True)
+opts.set_capability("appium:automationName", "UiAutomator2")
+opts.set_capability("appium:noReset", True)
 opts.add_argument("--disable-blink-features=AutomationControlled")
 opts.add_argument("--no-first-run")
 
