@@ -74,6 +74,9 @@ jobs:
             adb shell settings put global device_provisioned 1 || true
             adb shell settings put secure user_setup_complete 1 || true
 
+            echo "=== DISMISS CHROME FIRST-RUN (FRE) ==="
+            python3 probe/dismiss_fre.py || true
+
             echo "=== UA / CLIENT-HINT CAPTURE (real Chrome headers) ==="
             python3 probe/capture_ua.py
 
