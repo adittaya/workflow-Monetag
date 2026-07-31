@@ -24,6 +24,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: KVM availability diagnostic
+        run: |
+          set -x
+          ls -l /dev/kvm || true
+          groups || true
+          id -u || true
+          echo "$ANDROID_HOME"
+          test -f "$ANDROID_HOME/emulator/emulator" && "$ANDROID_HOME/emulator/emulator" -accel-check || echo "no emulator binary yet"
+
       - name: Run headless x86_64 Android emulator + collect evidence
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -33,6 +42,7 @@ jobs:
           profile: pixel_7
           disable-animations: true
           headless: true
+          emulator-options: -accel on
           script: |
             set -e
             mkdir -p probe
